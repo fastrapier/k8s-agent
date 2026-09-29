@@ -1,0 +1,44 @@
+[project]
+name = "k8s-incident-agent"
+version = "0.1.0"
+description = "Мультиагентная диагностика инцидентов в Kubernetes"
+# readme намеренно не объявлен: README.md собирает основной агент
+requires-python = ">=3.12,<3.13"
+
+# Версии зафиксированы точно (N6, воспроизводимость).
+# Транзитивные зависимости пришпилены в uv.lock.
+dependencies = [
+    "typer==0.27.2",
+    "pydantic==2.13.5",
+    "pydantic-settings==2.15.0",
+    "kubernetes==36.0.3",
+    "pyyaml==6.0.3",
+    "rich==15.0.0",
+]
+
+[project.scripts]
+k8s-agent = "k8s_incident_agent.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.16.9",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/k8s_incident_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

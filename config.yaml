@@ -1,0 +1,30 @@
+# Конфигурация k8s-incident-agent.
+# Значения вида ${VAR} подставляются из окружения процесса и из local.env
+# (local.env в git не попадает, см. .gitignore).
+
+# Бюджет одного инцидента. Числа и их обоснование — docs/TZ.md, N3 и F5.
+budget:
+  max_tool_calls: 15          # N3: полный обход одного сценария с запасом на одну неудачную ветку
+  max_seconds: 180            # N3: верхняя граница ожидания инженера
+  max_review_iterations: 2    # F5: потолок петли «ревьюер → диагност»
+
+# LLM. Любая OpenAI-совместимая модель подключается сменой этих полей (N7).
+llm:
+  base_url: ${LLM_API_URL}
+  api_key: ${LLM_API_TOKEN}
+  # Предварительно, до М3. Базовая линия ТЗ (deepseek-v3.2) на пилотном замере
+  # не вызвала ни одного инструмента — см. .scratch/llm-pilot.md.
+  model: z-ai/glm-5.3
+  temperature: 0.0
+
+# Слой инструментов.
+tools:
+  max_output_chars: 8000      # лимит обрезки сырого вывода одного инструмента
+  default_log_tail: 200       # сколько последних строк лога берём, если tail не задан
+
+# Целевой кластер. Имена стенда живут только здесь, в коде их нет.
+k8s:
+  context: kind-k8s-incident-agent
+  default_namespace: default
+  readonly_kubeconfig: ${K8S_RO_KUBECONFIG}   # kubeconfig с токеном SA incident-agent-ro
+  readwrite_kubeconfig: ${K8S_RW_KUBECONFIG}  # kubeconfig с токеном SA incident-agent-rw
