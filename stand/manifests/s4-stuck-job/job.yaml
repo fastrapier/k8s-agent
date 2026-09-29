@@ -1,0 +1,81 @@
+# Сценарий S4 — «Почему job не завершается» (ТЗ раздел 2;
+# вариация «init-контейнер ждёт недоступный сервис» из EVALS раздел 4.2).
+#
+# Поломка: init-контейнер wait-for-db в цикле ждёт, пока поднимется сервис payments-db:5432.
+#   Такого Service в namespace payments нет (в релизе поменяли имя, а Job не поправили),
+#   поэтому имя никогда не разрезолвится и цикл не закончится. Основной контейнер migrate
+#   не стартует вообще.
+#
+# Симптом, который увидит инженер:
+#   - kubectl get jobs -n payments  →  db-migrate  COMPLETIONS 0/1, возраст растёт;
+#   - kubectl get pods -n payments -l job-name=db-migrate  →  STATUS Init:0/1, 0 RESTARTS;
+#   - kubectl logs <pod> -c wait-for-db  →  бесконечное «waiting for payments-db:5432 ...»;
+#   - kubectl describe pod → Init Containers: wait-for-db State: Running, основной контейнер
+#     migrate — State: Waiting, Reason: PodInitializing;
+#   - kubectl get svc -n payments → сервиса payments-db нет.
+#
+# Важно для диагностики: backoffLimit тут ни при чём и рестартов нет — это отличает данный
+#   кейс от вариации «превышен backoffLimit». activeDeadlineSeconds намеренно не задан:
+#   именно его отсутствие и делает Job вечным, и это один из ожидаемых пунктов рекомендации.
+#
+# Ожидаемое исправление: поправить имя сервиса в init-контейнере (или создать Service
+#   payments-db), плюс задать activeDeadlineSeconds, чтобы Job падал, а не висел.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  namespace: payments
+  labels:
+    app: db-migrate
+    app.kubernetes.io/part-of: k8s-incident-agent-stand
+    stand.k8s-incident-agent/scenario: s4
+  annotations:
+    stand.k8s-incident-agent/root-cause: "init-контейнер бесконечно ждёт несуществующий сервис payments-db:5432"
+spec:
+  backoffLimit: 4
+  # activeDeadlineSeconds намеренно отсутствует — см. комментарий выше.
+  template:
+    metadata:
+      labels:
+        app: db-migrate
+        stand.k8s-incident-agent/scenario: s4
+    spec:
+      restartPolicy: Never
+      initContainers:
+        # ПОЛОМКА S4: ждём сервис, которого нет в namespace payments.
+        - name: wait-for-db
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "[wait-for-db] waiting for database service payments-db:5432"
+              until nc -w 2 payments-db 5432 </dev/null 2>/dev/null; do
+                echo "[wait-for-db] payments-db:5432 is not reachable yet, retrying in 3s"
+                sleep 3
+              done
+              echo "[wait-for-db] database is up"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        - name: migrate
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "[migrate] applying migrations 0001..0007"
+              sleep 5
+              echo "[migrate] done"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi

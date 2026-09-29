@@ -1,0 +1,66 @@
+# Сценарий S3 — «Deployment не раскатывается, зависли 2 из 5 подов» (ТЗ раздел 2;
+# вариация «несуществующий nodeSelector» из EVALS раздел 4.2).
+#
+# Часть 1 из 2: исходный, ЗДОРОВЫЙ релиз. Скрипт break.sh сначала применяет его и дожидается
+# успешной раскатки (3/3 Ready), и только потом накатывает поломку из 20-break-nodeselector.yaml.
+# Без этого шага не было бы «частично зависшей» раскатки: все поды сразу оказались бы в Pending,
+# а в ТЗ сценарий звучит именно как «зависли 2 из 5».
+#
+# Стратегия подобрана так, чтобы картинка была детерминированной:
+#   replicas=3, maxSurge=2, maxUnavailable=0
+#   → новый ReplicaSet поднимает ровно 2 пода, старый держит свои 3, пока новые не станут Ready.
+#   Итого 5 подов, из них 2 в Pending. Ровно формулировка ТЗ.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reports
+  namespace: payments
+  labels:
+    app: reports
+    app.kubernetes.io/part-of: k8s-incident-agent-stand
+    stand.k8s-incident-agent/scenario: s3
+  annotations:
+    kubernetes.io/change-cause: "release v1: исходная рабочая версия"
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: reports
+  template:
+    metadata:
+      labels:
+        app: reports
+        stand.k8s-incident-agent/scenario: s3
+    spec:
+      containers:
+        - name: reports
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "[reports] starting, version 1.0.0"
+              mkdir -p /www && echo "reports ok" > /www/index.html
+              echo "[reports] listening on :8080"
+              exec httpd -f -p 8080 -h /www
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi

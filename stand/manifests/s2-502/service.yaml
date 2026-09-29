@@ -1,0 +1,33 @@
+# Сценарий S2 — часть 2 из 3: ЗДЕСЬ ПОЛОМКА.
+#
+# Поломка: selector сервиса остался от релиза v1 (version: v1), а поды после релиза
+#   имеют метку version: v2. Ни один под под selector не подходит → EndpointSlice пуст.
+#
+# Симптом, который увидит инженер:
+#   - внешний запрос через Ingress отдаёт 502 (нет ни одного upstream);
+#   - kubectl get endpoints web -n payments  →  ENDPOINTS: <none>;
+#   - kubectl get endpointslices -n payments -l kubernetes.io/service-name=web → без адресов;
+#   - при этом kubectl get pods -n payments -l app=web  →  2/2 Running, Ready.
+#     Классическая ловушка: «поды живые, а сервис не работает».
+#
+# Ожидаемое исправление: привести spec.selector сервиса к меткам подов (version: v2)
+#   либо вернуть метку version: v1 подам. Правильный вариант — чинить сервис.
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: payments
+  labels:
+    app: web
+    stand.k8s-incident-agent/scenario: s2
+  annotations:
+    stand.k8s-incident-agent/root-cause: "selector сервиса (version=v1) не совпадает с метками подов (version=v2)"
+spec:
+  selector:
+    app: web
+    # ПОЛОМКА S2: релиз v2 сменил метку подов, а тут осталось v1.
+    version: v1
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

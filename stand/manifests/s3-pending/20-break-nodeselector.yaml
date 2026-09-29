@@ -1,0 +1,28 @@
+# Сценарий S3 — часть 2 из 2: ЗДЕСЬ ПОЛОМКА. Strategic-merge-патч к Deployment reports.
+# Применяется как:
+#   kubectl -n payments patch deployment reports --patch-file 20-break-nodeselector.yaml
+#
+# Поломка: в релизе v2 подам добавили nodeSelector disktype=nvme. Такой метки нет ни на одной
+#   ноде кластера (у kind-нод её никто не проставляет), поэтому планировщик не может разместить
+#   новые поды ни на одном узле.
+#
+# Симптом, который увидит инженер:
+#   - kubectl get pods -n payments -l app=reports  →  5 подов: 3 Running (старый ReplicaSet)
+#     и 2 Pending (новый), Pending висят бесконечно;
+#   - kubectl rollout status deployment/reports -n payments  →  «Waiting for deployment ... 2 out
+#     of 5 updated replicas are available», не завершается;
+#   - kubectl describe pod <pending> → Events: FailedScheduling,
+#     «0/3 nodes are available: 1 node(s) had untolerated taint {node-role.kubernetes.io/control-plane},
+#      2 node(s) didn't match Pod's node affinity/selector»;
+#   - kubectl get nodes --show-labels → метки disktype нет ни у одной ноды.
+#
+# Ожидаемое исправление: убрать nodeSelector, либо навесить метку disktype=nvme на ноды,
+#   у которых действительно NVMe. Патч по пути spec.template.spec.nodeSelector.
+spec:
+  template:
+    metadata:
+      annotations:
+        stand.k8s-incident-agent/root-cause: "nodeSelector disktype=nvme не совпадает ни с одной нодой"
+    spec:
+      nodeSelector:
+        disktype: nvme

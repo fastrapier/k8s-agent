@@ -1,0 +1,90 @@
+# База стенда: ЗДОРОВЫЙ Deployment — контрольный образец.
+#
+# Сценарий: нет (контраст к S1–S4).
+# Зачем: на защите видно, что агент отличает рабочую нагрузку от сломанной и не «находит»
+#   проблему там, где её нет. Это же объект для проверки ложных срабатываний.
+# Симптом: нет. 2/2 Ready, readiness-проба зелёная, endpoints у сервиса заполнены.
+#
+# Ключевая деталь для сравнения с S1: здесь DB_PASSWORD подтягивается из Secret payments-db
+# через secretKeyRef. У сломанного api из S1 ровно этого блока и нет.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+  namespace: payments
+  labels:
+    app: checkout
+    app.kubernetes.io/part-of: k8s-incident-agent-stand
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: checkout
+  template:
+    metadata:
+      labels:
+        app: checkout
+    spec:
+      containers:
+        - name: checkout
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "[checkout] starting, version 2.1.0"
+              if [ -z "${DB_PASSWORD:-}" ]; then
+                echo "[checkout] FATAL: environment variable DB_PASSWORD is not set; cannot connect to database ${DB_NAME}" >&2
+                exit 1
+              fi
+              echo "[checkout] connected to ${DB_HOST}/${DB_NAME} as ${DB_USER}"
+              mkdir -p /www && echo "checkout ok" > /www/index.html
+              echo "[checkout] listening on :8080"
+              exec httpd -f -p 8080 -h /www
+          env:
+            - name: DB_HOST
+              value: postgres.payments.svc.cluster.local
+            - name: DB_NAME
+              value: payments
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: payments-db
+                  key: username
+            # Вот эта ссылка и есть разница между здоровым checkout и сломанным api из S1.
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: payments-db
+                  key: password
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout
+  namespace: payments
+  labels:
+    app: checkout
+spec:
+  selector:
+    app: checkout
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

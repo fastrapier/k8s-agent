@@ -1,0 +1,9 @@
+# База стенда: namespace, в котором живут все сценарии S1–S4.
+# Имя payments зафиксировано в ТЗ раздел 2 (запросы пользователя ссылаются именно на него).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: payments
+  labels:
+    app.kubernetes.io/part-of: k8s-incident-agent-stand
+    stand.k8s-incident-agent/role: target

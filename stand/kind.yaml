@@ -1,0 +1,39 @@
+# Кластер для демо-стенда k8s-incident-agent (ТЗ N6: стенд поднимается одной командой).
+#
+# Три ноды: 1 control-plane + 2 worker.
+# Почему не одна: control-plane несёт taint node-role.kubernetes.io/control-plane:NoSchedule,
+# то есть при одной ноде планировщик писал бы «0/1 nodes are available», и сценарий S3
+# (под не влезает / не подходит по nodeSelector) выглядел бы как артефакт стенда, а не как
+# правдоподобная нехватка места. С двумя воркерами событие читается как в проде:
+# «0/3 nodes are available: 1 node(s) had untolerated taint, 2 node(s) didn't match ...».
+# Почему не больше: каждая нода — отдельный контейнер Docker (~500 МБ RSS на ноутбуке),
+# третий воркер ничего не добавляет к сценариям S1–S4.
+#
+# Версия ноды зафиксирована тегом (ТЗ N6). Дайджест намеренно не прибит: его надо брать из
+# release notes той версии kind, что стоит на машине. Если образ не тянется — закомментируйте
+# строки image, kind возьмёт дефолтный образ своей версии.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: k8s-incident-agent
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.31.0
+    # Метка и проброс портов нужны, чтобы при желании доставить ingress-controller
+    # и получить настоящий 502 в S2. В М1 контроллер намеренно не ставится (см. README).
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 8080
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 8443
+        protocol: TCP
+  - role: worker
+    image: kindest/node:v1.31.0
+  - role: worker
+    image: kindest/node:v1.31.0

@@ -1,0 +1,28 @@
+# Сценарий S2 — часть 3 из 3: точка входа, с которой начинается жалоба «отдаёт 502».
+#
+# Сам Ingress корректен. Он нужен, чтобы в кластере существовало верхнее звено цепочки
+# Ingress → Service → Endpoints → Pods, которую агент обязан пройти (ТЗ раздел 2, S2).
+#
+# В М1 ingress-controller намеренно не ставится (см. stand/README.md): 502 воспроизводится
+# на уровне объектов — пустой EndpointSlice у сервиса, на который ссылается Ingress.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  namespace: payments
+  labels:
+    app: web
+    stand.k8s-incident-agent/scenario: s2
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: payments.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 80
