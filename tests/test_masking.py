@@ -21,6 +21,37 @@ def test_secret_data_masked_keys_preserved():
     assert SECRET_VALUE not in json.dumps(masked)
 
 
+def test_secret_last_applied_annotation_is_masked_before_evidence(config, store):
+    """Найдено живым прогоном М1: `kubectl apply` кладёт исходный `stringData` в аннотацию."""
+    manifest = secret_manifest()
+    manifest["metadata"]["annotations"] = {
+        "kubectl.kubernetes.io/last-applied-configuration": json.dumps(
+            {"kind": "Secret", "stringData": {"password": SECRET_VALUE}}
+        ),
+        "operator.example/note": f"credential={SECRET_VALUE}",
+    }
+    core = SimpleNamespace(read_namespaced_secret=lambda name, namespace: manifest)
+    result = k8s_get_manifest(
+        "Secret", "db-credentials", "payments",
+        clients=make_clients(core=core), store=store, config=config,
+    )
+
+    assert result.status == "ok"
+    assert SECRET_VALUE not in json.dumps(result.model_dump(), ensure_ascii=False)
+    assert SECRET_VALUE not in (store.raw(store.get(result.evidence_id).raw_ref) or "")
+    assert MASK in result.data["manifest_yaml"]
+
+
+def test_annotations_of_other_objects_not_masked():
+    """У Deployment аннотации нужны диагносту: по ним `k8s_rollout_history` ищет ревизию."""
+    annotations = {
+        "deployment.kubernetes.io/revision": "3",
+        "kubectl.kubernetes.io/last-applied-configuration": '{"kind": "Deployment"}',
+    }
+    manifest = {"kind": "Deployment", "metadata": {"annotations": dict(annotations)}}
+    assert mask_object(manifest)["metadata"]["annotations"] == annotations
+
+
 def test_string_data_masked_even_without_kind():
     """`stringData` есть только у Secret, поэтому маскируется независимо от kind."""
     masked = mask_object({"stringData": {"token": "plain-text-token"}})
@@ -35,9 +66,11 @@ def test_configmap_data_not_masked():
 
 def test_secret_list_items_masked():
     """У элементов SecretList поле kind пустое — маскирование идёт от типа списка."""
-    listing = {"kind": "SecretList", "items": [dict(secret_manifest(), kind=None)]}
-    masked = mask_object(listing)
+    item = dict(secret_manifest(), kind=None)
+    item["metadata"]["annotations"] = {"note": SECRET_VALUE}
+    masked = mask_object({"kind": "SecretList", "items": [item]})
     assert masked["items"][0]["data"]["DB_PASSWORD"] == MASK
+    assert masked["items"][0]["metadata"]["annotations"] == {"note": MASK}
     assert SECRET_VALUE not in json.dumps(masked)
 
 
