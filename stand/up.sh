@@ -49,6 +49,16 @@ kc rollout status deployment/metrics-server -n kube-system --timeout="${WAIT_TIM
 log "Жду, пока здоровый Deployment checkout станет доступен"
 kc rollout status deployment/checkout -n "$NAMESPACE" --timeout="${WAIT_TIMEOUT}s"
 
+# Учётки агента созданы манифестом base/20-agent-rbac.yaml. Агент ходит в кластер только
+# под ними; админский kubeconfig кладётся рядом лишь для демонстрации второго рубежа
+# (`make demo-s1`) и проверок (`make isolation-test`), агенту он не передаётся.
+log "Выпускаю kubeconfig'и учёток агента в ${AGENT_KUBE_DIR}"
+write_agent_kubeconfig incident-agent-ro "$RO_KUBECONFIG"
+write_agent_kubeconfig incident-agent-rw "$RW_KUBECONFIG"
+( umask 077; kind get kubeconfig --name "$CLUSTER_NAME" >"$ADMIN_KUBECONFIG" )
+dim "диагност:    $RO_KUBECONFIG (incident-agent-ro, токен на 24 ч)"
+dim "исполнитель: $RW_KUBECONFIG (incident-agent-rw, токен на 24 ч)"
+
 elapsed=$(( $(date +%s) - started ))
 echo
 ok "Стенд поднят за ${elapsed}с. Контекст kubectl: $KUBE_CONTEXT, namespace: $NAMESPACE"

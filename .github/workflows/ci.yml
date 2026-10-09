@@ -40,6 +40,7 @@ jobs:
           kind version
       - run: uv sync --locked
       - run: make stand
+      - run: make isolation-test
       - run: make demo-s1 | tee demo-s1.txt
         env:
           # Без этого rich переносит строки по 80 символов и разрезает значение Secret:

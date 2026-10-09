@@ -1,9 +1,8 @@
 """Клиенты Kubernetes: два раздельных контура (N1, docs/ISOLATION.md, раздел 5).
 
 Read-only и read-write клиенты создаются разными функциями и читают токены из
-разных kubeconfig-файлов: `K8S_RO_KUBECONFIG` (SA `incident-agent-ro`) и
-`K8S_RW_KUBECONFIG` (SA `incident-agent-rw`). Общего клиента нет намеренно —
-случайно получить права на запись из диагностического кода нельзя.
+разных kubeconfig-файлов, заданных в `config.yaml`. Без своего файла контур
+отказывает в работе: учётка по умолчанию с правами администратора не используется.
 
 Модуль read-only инструментов (`tools/readonly.py`) обязан вызывать только
 `build_readonly_clients`. Это проверяется тестом `tests/test_isolation_imports.py`.
@@ -12,6 +11,7 @@ Read-only и read-write клиенты создаются разными фун�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
@@ -44,12 +44,21 @@ class ReadWriteClients:
 
 def _api_client(kubeconfig: str | None, context: str) -> k8s_client.ApiClient:
     """Отдельный ApiClient на каждый контур: конфигурация не глобальная, а своя."""
+    if kubeconfig is None:
+        raise K8sClientError(
+            "путь к kubeconfig не задан; учётка по умолчанию намеренно не используется "
+            "(там администратор). Выполните make stand-up"
+        )
+    if not Path(kubeconfig).is_file():
+        raise K8sClientError(
+            f"файл kubeconfig не найден: {kubeconfig}. Выполните make stand-up"
+        )
     try:
         return k8s_config.new_client_from_config(config_file=kubeconfig, context=context)
     except Exception as exc:  # noqa: BLE001 — наружу отдаём одну понятную ошибку
-        source = kubeconfig or "kubeconfig по умолчанию"
         raise K8sClientError(
-            f"не удалось собрать клиент Kubernetes (источник: {source}, контекст: {context}): {exc}"
+            f"не удалось собрать клиент Kubernetes "
+            f"(источник: {kubeconfig}, контекст: {context}): {exc}"
         ) from exc
 
 

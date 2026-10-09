@@ -1,5 +1,6 @@
 # Секреты и локальная конфигурация
 local.env
+.kube/
 *.local.env
 .env
 

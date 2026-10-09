@@ -114,6 +114,27 @@ readiness-проба metrics-server проходит только после п�
 отдавал бы `degraded`, и показать его вживую было бы нельзя. Путь `degraded` (кластер без
 metrics-server) по-прежнему проверяется юнит-тестом.
 
+## Учётки агента (М2)
+
+Агент ходит в кластер не под админом kind, а под двумя ServiceAccount из
+`manifests/base/20-agent-rbac.yaml` (`docs/ISOLATION.md`, раздел 5):
+
+| Учётка | kubeconfig | Права |
+|---|---|---|
+| `incident-agent-ro` — диагност | `.kube/agent-ro.kubeconfig` | `get`/`list` того, что читают инструменты, на весь кластер; **без `secrets`** |
+| `incident-agent-rw` — исполнитель (М4) | `.kube/agent-rw.kubeconfig` | `get`/`patch` deployments, statefulsets, configmaps в `payments` |
+
+`up.sh` выпускает токены (TokenRequest, 24 часа) и пишет kubeconfig'и в `.kube/` в корне
+репозитория; каталог закрыт `.gitignore`. Рядом кладётся `.kube/admin.kubeconfig` — только для
+демонстрации второго рубежа в `make demo-s1` и для `make isolation-test`; агенту он не передаётся.
+Токен истёк — `./up.sh` (или `make stand-up`) выпустит новый, кластер при этом не пересоздаётся.
+
+RBAC лежит в `base`, потому что `Role` исполнителя живёт в namespace `payments` и удаляется вместе
+с ним в `clean.sh all`; base переприменяют и `up.sh`, и `break.sh`.
+
+`make isolation-test` проверяет матрицу прав через сами kubeconfig'и учёток и оба рубежа защиты
+Secret через слой инструментов агента.
+
 ## Что стенд намеренно не делает
 
 - **Не ставит ingress-controller.** В S2 объект `Ingress` есть, но обрабатывать его некому.
@@ -123,7 +144,6 @@ metrics-server) по-прежнему проверяется юнит-тесто
   поломки (неверный `targetPort`), а сам проект ingress-nginx заархивирован с марта 2026.
   Поэтому заготовка под контроллер (метка `ingress-ready` и проброс портов 8080/8443) из
   `kind.yaml` убрана: порт 8080 на ноутбуке часто занят, и это лишний риск на демо.
-- **Не создаёт ServiceAccount и RBAC.** Это этап М2 (`docs/ISOLATION.md`, раздел 5).
 - **Не содержит `case.yaml` и каталог `evals/`.** Это этап М8. Сейчас стенд ручной; вариации
   поломок и условия ожидания совпадают с будущими кейсами, чтобы М8 переиспользовал эти манифесты.
 

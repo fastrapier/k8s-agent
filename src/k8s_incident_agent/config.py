@@ -34,7 +34,7 @@ def find_repo_root() -> Path:
 
 
 class EnvSettings(BaseSettings):
-    """Секреты и пути к kubeconfig. Переменная окружения важнее строки в `local.env`."""
+    """Настройки LLM. Переменная окружения важнее строки в `local.env`."""
 
     model_config = SettingsConfigDict(
         env_file_encoding="utf-8",
@@ -44,16 +44,12 @@ class EnvSettings(BaseSettings):
 
     llm_api_token: SecretStr | None = None
     llm_api_url: str | None = None
-    k8s_ro_kubeconfig: str | None = None
-    k8s_rw_kubeconfig: str | None = None
 
     def as_mapping(self) -> dict[str, str]:
         """Плоская карта ИМЯ_ПЕРЕМЕННОЙ -> значение для подстановки в yaml."""
         raw = {
             "LLM_API_TOKEN": self.llm_api_token,
             "LLM_API_URL": self.llm_api_url,
-            "K8S_RO_KUBECONFIG": self.k8s_ro_kubeconfig,
-            "K8S_RW_KUBECONFIG": self.k8s_rw_kubeconfig,
         }
         result: dict[str, str] = {}
         for key, value in raw.items():
@@ -122,7 +118,12 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
     values = settings.as_mapping()
 
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    return AppConfig.model_validate(_expand(raw, values))
+    config = AppConfig.model_validate(_expand(raw, values))
+    for field in ("readonly_kubeconfig", "readwrite_kubeconfig"):
+        path = getattr(config.k8s, field)
+        if path is not None and not Path(path).is_absolute():
+            setattr(config.k8s, field, str((config_path.parent / path).resolve()))
+    return config
 
 
 @lru_cache(maxsize=1)

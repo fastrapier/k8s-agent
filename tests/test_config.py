@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from k8s_incident_agent.config import find_repo_root, load_config, redacted_dict
 from k8s_incident_agent.masking import MASK
 
@@ -17,8 +19,8 @@ tools: {max_output_chars: 8000, default_log_tail: 200}
 k8s:
   context: kind-k8s-incident-agent
   default_namespace: default
-  readonly_kubeconfig: ${K8S_RO_KUBECONFIG}
-  readwrite_kubeconfig: ${K8S_RW_KUBECONFIG}
+  readonly_kubeconfig: .kube/agent-ro.kubeconfig
+  readwrite_kubeconfig: .kube/agent-rw.kubeconfig
 """
 
 
@@ -38,8 +40,41 @@ def test_env_placeholders_resolved_from_env_file(tmp_path):
 
     assert config.llm.base_url == "https://gateway.example/v1"
     assert config.llm.api_key.get_secret_value() == "super-token"
-    # незаданные переменные превращаются в None, а не остаются строкой "${...}"
-    assert config.k8s.readonly_kubeconfig is None
+
+
+def test_kubeconfig_paths_resolved_from_config_directory(tmp_path, monkeypatch):
+    directory = tmp_path / "settings"
+    directory.mkdir()
+    config_path, env_path = _write(directory, "")
+    monkeypatch.chdir(tmp_path)
+
+    config = load_config(config_path.relative_to(tmp_path), env_path)
+
+    assert config.k8s.readonly_kubeconfig == str(directory / ".kube/agent-ro.kubeconfig")
+    assert config.k8s.readwrite_kubeconfig == str(directory / ".kube/agent-rw.kubeconfig")
+
+
+@pytest.mark.parametrize("value", ["/absolute/agent.kubeconfig", None])
+def test_absolute_and_missing_kubeconfig_paths_unchanged(tmp_path, value):
+    config_path, env_path = _write(tmp_path, "")
+    config_path.write_text(
+        CONFIG_TEMPLATE.replace(".kube/agent-ro.kubeconfig", value or "null").replace(
+            ".kube/agent-rw.kubeconfig", value or "null"
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path, env_path)
+
+    assert config.k8s.readonly_kubeconfig == value
+    assert config.k8s.readwrite_kubeconfig == value
+
+
+def test_missing_env_placeholder_becomes_none(tmp_path, monkeypatch):
+    monkeypatch.delenv("LLM_API_URL", raising=False)
+    config_path, env_path = _write(tmp_path, "")
+
+    assert load_config(config_path, env_path).llm.base_url is None
 
 
 def test_token_never_appears_in_string_form(tmp_path):

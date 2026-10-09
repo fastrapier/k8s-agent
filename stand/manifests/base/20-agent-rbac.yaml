@@ -1,0 +1,92 @@
+# Учётки агента: два ServiceAccount, два контура прав (ТЗ N1, docs/ISOLATION.md раздел 5).
+#
+# incident-agent-ro — диагност. Только get/list, и только то, что читают семь read-only
+#   инструментов (tools/readonly.py). Secret здесь нет намеренно: непрочитанное нечем утечь.
+#   Права на весь кластер, а не на payments: evals создают свежий namespace на каждый кейс
+#   (EVALS 4.3), а Node — кластерный объект, он нужен в S3.
+# incident-agent-rw — исполнитель (этап М4). Только get/patch существующих объектов и только
+#   в payments: ни create, ни delete, ни exec. rollout restart — это patch аннотации.
+#
+# Лежит в base, потому что Role исполнителя живёт в namespace payments и удаляется вместе
+# с ним (`clean.sh all`). base переприменяют и up.sh, и break.sh — права возвращаются сами.
+# kubeconfig'и с токенами этих учёток выпускает up.sh в .kube/ (в git не попадает).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-system
+  labels:
+    app.kubernetes.io/part-of: k8s-incident-agent-stand
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: incident-agent-ro
+  namespace: agent-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: incident-agent-ro
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, events, services, endpoints, configmaps,
+                persistentvolumeclaims, serviceaccounts, nodes]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets, daemonsets]
+    verbs: [get, list]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list]
+  - apiGroups: [metrics.k8s.io]   # k8s_top
+    resources: [pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: incident-agent-ro
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: incident-agent-ro
+subjects:
+  - kind: ServiceAccount
+    name: incident-agent-ro
+    namespace: agent-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: incident-agent-rw
+  namespace: agent-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: incident-agent-rw
+  namespace: payments
+rules:
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: incident-agent-rw
+  namespace: payments
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: incident-agent-rw
+subjects:
+  - kind: ServiceAccount
+    name: incident-agent-rw
+    namespace: agent-system

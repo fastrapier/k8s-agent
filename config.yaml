@@ -26,5 +26,6 @@ tools:
 k8s:
   context: kind-k8s-incident-agent
   default_namespace: default
-  readonly_kubeconfig: ${K8S_RO_KUBECONFIG}   # kubeconfig с токеном SA incident-agent-ro
-  readwrite_kubeconfig: ${K8S_RW_KUBECONFIG}  # kubeconfig с токеном SA incident-agent-rw
+  # Файлы выпускает stand/up.sh; пути относительно корня репозитория.
+  readonly_kubeconfig: .kube/agent-ro.kubeconfig   # токен SA incident-agent-ro
+  readwrite_kubeconfig: .kube/agent-rw.kubeconfig  # токен SA incident-agent-rw
