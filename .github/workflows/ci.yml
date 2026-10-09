@@ -32,10 +32,12 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "0.12.20"
+      # На раннере уже есть kind неизвестной версии; ставим поверх ту же, что у автора.
       - name: kind v0.33.0
         run: |
-          curl -fsSLo /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
-          chmod +x /usr/local/bin/kind
+          curl -fsSLo "$RUNNER_TEMP/kind" https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+          sudo install -m 0755 "$RUNNER_TEMP/kind" /usr/local/bin/kind
+          kind version
       - run: uv sync --locked
       - run: make stand
       - run: make demo-s1 | tee demo-s1.txt
