@@ -412,15 +412,19 @@ def k8s_logs(
 
     def work() -> ToolResult:
         api = _clients(clients, config).core
-        text = api.read_namespaced_pod_log(
+        # Клиент kubernetes 36 с предзагрузкой отдаёт лог как str(bytes): «b'...\\n...'» одной
+        # строкой. Берём сырой ответ и декодируем сами — строки лога остаются строками.
+        response = api.read_namespaced_pod_log(
             name=pod,
             namespace=namespace,
             container=container,
             tail_lines=tail,
             previous=previous,
+            _preload_content=False,
         )
+        text = response.data.decode("utf-8", errors="replace")
         # Маскирование до обрезки и до записи свидетельства (ISOLATION §6).
-        masked = mask_text(text or "")
+        masked = mask_text(text)
         body, truncated = truncate(masked, config.tools.max_output_chars)
         lines = body.splitlines()
         summary = (
