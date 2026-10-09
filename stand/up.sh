@@ -29,6 +29,23 @@ kc get nodes -o wide
 log "Применяю базовые объекты (namespace, Secret, здоровый Deployment checkout)"
 kc apply -f "$MANIFESTS_DIR/base/"
 
+METRICS_SERVER_VERSION="v0.9.0"
+log "Устанавливаю metrics-server $METRICS_SERVER_VERSION"
+kc apply -f "https://github.com/kubernetes-sigs/metrics-server/releases/download/${METRICS_SERVER_VERSION}/components.yaml"
+
+# Kubelet в kind отдаёт самоподписанный сертификат: без этого флага metrics-server
+# не может его проверить и не становится Ready. Это стандартная настройка для kind.
+# Проверяем аргументы, чтобы повторный запуск не добавлял флаг второй раз.
+metrics_server_args="$(kc get deployment metrics-server -n kube-system \
+  -o jsonpath='{range .spec.template.spec.containers[0].args[*]}{.}{"\n"}{end}')"
+if ! grep -Fxq -- '--kubelet-insecure-tls' <<<"$metrics_server_args"; then
+  kc patch deployment metrics-server -n kube-system --type=json \
+    -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+fi
+
+log "Жду готовности metrics-server и первого сбора метрик"
+kc rollout status deployment/metrics-server -n kube-system --timeout="${WAIT_TIMEOUT}s"
+
 log "Жду, пока здоровый Deployment checkout станет доступен"
 kc rollout status deployment/checkout -n "$NAMESPACE" --timeout="${WAIT_TIMEOUT}s"
 

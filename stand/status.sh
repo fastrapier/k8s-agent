@@ -22,6 +22,12 @@ if ! kc get --raw /readyz >/dev/null 2>&1; then
 fi
 kc get nodes -o wide
 
+if kc top nodes >/dev/null 2>&1; then
+  ok "metrics-server: метрики есть"
+else
+  warn "metrics-server: метрик нет, k8s_top вернёт degraded. metrics-server ставит ./up.sh"
+fi
+
 echo
 log "Namespace $NAMESPACE"
 if ! namespace_exists; then
