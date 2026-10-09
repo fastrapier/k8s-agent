@@ -108,11 +108,13 @@ services:
 
 | Учётка | Объект RBAC | Права |
 |---|---|---|
-| `agent-system/incident-agent-ro` | `ClusterRole` | `get`, `list` на то, что читают семь инструментов: pods, pods/log, events, services, endpoints, configmaps, persistentvolumeclaims, serviceaccounts, nodes; deployments, replicasets, statefulsets, daemonsets; jobs, cronjobs; ingresses; `metrics.k8s.io/pods`. **Без `secrets`** |
+| `agent-system/incident-agent-ro` | `ClusterRole` | `get` — на то, что инструменты читают по имени: pods, pods/log, services, endpoints, configmaps, persistentvolumeclaims, serviceaccounts, nodes; deployments, replicasets, statefulsets, daemonsets; jobs, cronjobs; ingresses. `list` — только на то, что они перечисляют: pods, events, replicasets, `metrics.k8s.io/pods`. **Без `secrets`**, без `exec`/`attach`/`portforward` |
 | `agent-system/incident-agent-rw` | `Role` в `payments` | `get`, `patch` на deployments, statefulsets, configmaps |
 
 Права выписаны по факту кода (`tools/readonly.py`), а не «на всякий случай»: в черновике этого
-раздела были `watch` и `networkpolicies`, но ни один инструмент их не использует — убраны.
+раздела были `get`+`list`+`watch` на всё и `networkpolicies`. Ни один инструмент не делает
+`watch`, не читает NetworkPolicy и не перечисляет, например, ConfigMap по всему кластеру —
+поэтому `get` и `list` разведены по отдельным правилам.
 Почему `ClusterRole`, а не `Role` в `payments`: evals создают свежий namespace на каждый кейс
 (`docs/EVALS.md` 4.3), а Node — кластерный объект (нужен в S3).
 
@@ -190,6 +192,12 @@ namespace входит в список разрешённых, и — главн
 - **Prompt injection остаётся возможной** — модель можно заставить написать неверный отчёт или
   предложить вредный патч. Не может: применить его без человека. Митигация — L4 и требование
   показывать diff.
+- **`patch deployments` у исполнителя открывает Secret'ы своего namespace.** Достаточно
+  дописать в под `env` из `secretKeyRef` или смонтировать том — и значение окажется в поде.
+  Строка `isolation-test` «rw не может `get secrets`» верна только на уровне RBAC; настоящий
+  барьер здесь — белый список путей патча в коде (раздел 6, этап М4) и подтверждение человека.
+  Серверный вариант на будущее — ValidatingAdmissionPolicy по имени учётки исполнителя,
+  пропускающая только пути из белого списка.
 - **Белый список путей патча сам может быть ошибочным.** Он сужает поверхность до перечисленных
   полей, но если в него по недосмотру попадёт опасный путь, ничто ниже уровня человека это не
   поймает. Изменения белого списка должны проходить ревью наравне с кодом.

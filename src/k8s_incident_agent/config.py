@@ -121,8 +121,11 @@ def load_config(config_path: Path | None = None, env_path: Path | None = None) -
     config = AppConfig.model_validate(_expand(raw, values))
     for field in ("readonly_kubeconfig", "readwrite_kubeconfig"):
         path = getattr(config.k8s, field)
-        if path is not None and not Path(path).is_absolute():
-            setattr(config.k8s, field, str((config_path.parent / path).resolve()))
+        if path is not None:
+            path = Path(path).expanduser()
+            if not path.is_absolute():
+                path = (config_path.parent / path).resolve()
+            setattr(config.k8s, field, str(path))
     return config
 
 

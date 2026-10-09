@@ -65,7 +65,6 @@ namespace_exists() {
 AGENT_KUBE_DIR="$(cd "$STAND_DIR/.." && pwd)/.kube"
 RO_KUBECONFIG="$AGENT_KUBE_DIR/agent-ro.kubeconfig"
 RW_KUBECONFIG="$AGENT_KUBE_DIR/agent-rw.kubeconfig"
-ADMIN_KUBECONFIG="$AGENT_KUBE_DIR/admin.kubeconfig"
 
 # kubeconfig для ServiceAccount агента: тот же API-сервер и CA, что у админского контекста,
 # но вместо сертификата администратора — токен учётки. Токен выпускается через TokenRequest
@@ -76,7 +75,8 @@ write_agent_kubeconfig() {
   server="$(kc config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')"
   ca="$(kc config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')"
   token="$(kc create token "$sa" -n agent-system --duration=24h)"
-  mkdir -p "$(dirname "$out")"
+  mkdir -p "$(dirname "$out")" && chmod 700 "$(dirname "$out")"
+  rm -f "$out"   # umask действует только при создании файла
   (
     umask 077
     cat >"$out" <<EOF

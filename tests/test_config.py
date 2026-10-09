@@ -70,6 +70,18 @@ def test_absolute_and_missing_kubeconfig_paths_unchanged(tmp_path, value):
     assert config.k8s.readwrite_kubeconfig == value
 
 
+def test_kubeconfig_tilde_expanded(tmp_path):
+    config_path, env_path = _write(tmp_path, "")
+    config_path.write_text(
+        CONFIG_TEMPLATE.replace(".kube/agent-ro.kubeconfig", "~/agent-ro.kubeconfig"),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path, env_path)
+
+    assert config.k8s.readonly_kubeconfig == str(Path.home() / "agent-ro.kubeconfig")
+
+
 def test_missing_env_placeholder_becomes_none(tmp_path, monkeypatch):
     monkeypatch.delenv("LLM_API_URL", raising=False)
     config_path, env_path = _write(tmp_path, "")

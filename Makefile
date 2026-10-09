@@ -63,7 +63,7 @@ demo-s1:  ## приёмка М1/М2: api в CrashLoopBackOff, Secret защищ�
 	@echo
 	@echo "--- рубеж 2, маскирование: тот же вызов под админом, как если бы RBAC настроили шире ---"
 	uv run k8s-agent tool k8s_get_manifest --kind Secret --name payments-db --ns payments \
-		--kubeconfig .kube/admin.kubeconfig
+		--kubeconfig $(HOME)/.kube/config
 
 # --- М2: изоляция -----------------------------------------------------------
 

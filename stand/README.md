@@ -121,13 +121,14 @@ metrics-server) по-прежнему проверяется юнит-тесто
 
 | Учётка | kubeconfig | Права |
 |---|---|---|
-| `incident-agent-ro` — диагност | `.kube/agent-ro.kubeconfig` | `get`/`list` того, что читают инструменты, на весь кластер; **без `secrets`** |
+| `incident-agent-ro` — диагност | `.kube/agent-ro.kubeconfig` | на весь кластер: `get` того, что инструменты читают по имени, `list` того, что перечисляют; **без `secrets`** и `exec` |
 | `incident-agent-rw` — исполнитель (М4) | `.kube/agent-rw.kubeconfig` | `get`/`patch` deployments, statefulsets, configmaps в `payments` |
 
 `up.sh` выпускает токены (TokenRequest, 24 часа) и пишет kubeconfig'и в `.kube/` в корне
-репозитория; каталог закрыт `.gitignore`. Рядом кладётся `.kube/admin.kubeconfig` — только для
-демонстрации второго рубежа в `make demo-s1` и для `make isolation-test`; агенту он не передаётся.
-Токен истёк — `./up.sh` (или `make stand-up`) выпустит новый, кластер при этом не пересоздаётся.
+репозитория (права 700/600, каталог закрыт `.gitignore`). Админского kubeconfig там нет
+намеренно: второй рубеж в `make demo-s1` показывается под `~/.kube/config`, а `isolation-test`
+берёт его во временный файл. Токен истёк — `./up.sh` (или `make stand-up`) выпустит новый,
+кластер при этом не пересоздаётся; `isolation-test` и инструменты в этом случае подсказывают ту же команду.
 
 RBAC лежит в `base`, потому что `Role` исполнителя живёт в namespace `payments` и удаляется вместе
 с ним в `clean.sh all`; base переприменяют и `up.sh`, и `break.sh`.

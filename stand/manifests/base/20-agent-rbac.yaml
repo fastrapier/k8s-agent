@@ -1,7 +1,8 @@
 # Учётки агента: два ServiceAccount, два контура прав (ТЗ N1, docs/ISOLATION.md раздел 5).
 #
-# incident-agent-ro — диагност. Только get/list, и только то, что читают семь read-only
-#   инструментов (tools/readonly.py). Secret здесь нет намеренно: непрочитанное нечем утечь.
+# incident-agent-ro — диагност. Права выписаны по вызовам семи инструментов (tools/readonly.py):
+#   get — на то, что они читают по имени, list — только на то, что они перечисляют.
+#   Secret здесь нет намеренно: непрочитанное нечем утечь.
 #   Права на весь кластер, а не на payments: evals создают свежий namespace на каждый кейс
 #   (EVALS 4.3), а Node — кластерный объект, он нужен в S3.
 # incident-agent-rw — исполнитель (этап М4). Только get/patch существующих объектов и только
@@ -28,22 +29,30 @@ kind: ClusterRole
 metadata:
   name: incident-agent-ro
 rules:
+  # get: k8s_describe, k8s_get_manifest, k8s_logs, k8s_rollout_history
   - apiGroups: [""]
-    resources: [pods, pods/log, events, services, endpoints, configmaps,
-                persistentvolumeclaims, serviceaccounts, nodes]
-    verbs: [get, list]
+    resources: [pods, pods/log, services, endpoints, configmaps, persistentvolumeclaims,
+                serviceaccounts, nodes]
+    verbs: [get]
   - apiGroups: [apps]
     resources: [deployments, replicasets, statefulsets, daemonsets]
-    verbs: [get, list]
+    verbs: [get]
   - apiGroups: [batch]
     resources: [jobs, cronjobs]
-    verbs: [get, list]
+    verbs: [get]
   - apiGroups: [networking.k8s.io]
     resources: [ingresses]
-    verbs: [get, list]
-  - apiGroups: [metrics.k8s.io]   # k8s_top
+    verbs: [get]
+  # list: k8s_list_pods, k8s_events (и события в k8s_describe), k8s_rollout_history, k8s_top
+  - apiGroups: [""]
+    resources: [pods, events]
+    verbs: [list]
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [list]
+  - apiGroups: [metrics.k8s.io]
     resources: [pods]
-    verbs: [get, list]
+    verbs: [list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
