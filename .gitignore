@@ -25,3 +25,6 @@ models/
 .DS_Store
 .idea/
 .vscode/
+
+# Временные git worktree для делегирования задач (Codex)
+.worktrees/
