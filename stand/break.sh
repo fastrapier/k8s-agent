@@ -70,6 +70,9 @@ check_s3() { [ "$(pending_pods 'app=reports')" -ge 2 ]; }
 break_s3() {
   log "S3 — Deployment не раскатывается: 2 из 5 подов reports в Pending"
   info "шаг 1/2: раскатываю исходную рабочую версию reports (3/3)"
+  # Пересоздаём, как S1: nodeSelector добавлен патчем, его нет в last-applied — повторный apply
+  # его не снимет, и rollout status ждал бы сломанную версию до progress deadline.
+  kc delete deployment reports -n "$NAMESPACE" --ignore-not-found --wait=true
   kc apply -f "$MANIFESTS_DIR/s3-pending/10-deployment.yaml"
   kc rollout status deployment/reports -n "$NAMESPACE" --timeout="${WAIT_TIMEOUT}s"
   info "шаг 2/2: накатываю релиз с несуществующим nodeSelector disktype=nvme"

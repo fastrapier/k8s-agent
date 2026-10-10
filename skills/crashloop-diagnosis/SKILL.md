@@ -10,11 +10,11 @@ tools: [k8s_list_pods, k8s_describe, k8s_logs, k8s_get_manifest, k8s_events]
 4. Вызови `k8s_logs(pod="<pod>", namespace="<ns>", previous=true, tail=200)` — лог ПРЕДЫДУЩЕГО запуска.
 5. Затем вызови `k8s_logs(pod="<pod>", namespace="<ns>", previous=false, tail=100)` для текущего старта.
 6. Вызови `k8s_events(namespace="<ns>", object="<pod>")`; события подтверждают probes, image pull и убийство контейнера.
-7. Вызови `k8s_get_manifest(kind="Deployment", name="<owner>", namespace="<ns>")`; сравни template и env.
+7. Вызови `k8s_get_manifest(kind="Deployment", name="<owner>", namespace="<ns>")`; имя владельца — без хеша ReplicaSet (`api`, не `api-86d9b8c4bd`).
 8. Если владелец StatefulSet, запроси `k8s_get_manifest(kind="StatefulSet", name="<owner>", namespace="<ns>")`.
 9. Secret читать нельзя: RBAC запрещает его получение, значение не запрашивай и не угадывай.
-10. Сравни env сломанного Deployment со здоровым Deployment того же namespace через `k8s_get_manifest`.
-11. Если здорового аналога нет, сравни соседние env и найди имя/key в `valueFrom.secretKeyRef`.
+10. Лог «переменная не задана», а в env её нет? Найди в `k8s_list_pods` здоровый (Running) Deployment того же namespace и прочитай его манифест: там видно, из какого Secret и под каким key эта переменная берётся. Без этого шага патч не составить.
+11. Если здорового аналога нет, ищи имя Secret и key в соседних env того же манифеста (`valueFrom.secretKeyRef`).
 12. Лог `environment variable ... is not set` и отсутствующий `secretKeyRef` подтверждают потерю конфигурации.
 13. `OOMKilled` подтверждается reason/exit code и метриками; probe failure — Events и полями liveness/readiness.
 14. Ошибка образа подтверждается `ErrImagePull`/`ImagePullBackOff`; образ не меняй, только рекомендуй проверку поставки.

@@ -29,8 +29,8 @@ metadata:
     app: db-migrate
     app.kubernetes.io/part-of: k8s-incident-agent-stand
     stand.k8s-incident-agent/scenario: s4
-  annotations:
-    stand.k8s-incident-agent/root-cause: "init-контейнер бесконечно ждёт несуществующий сервис payments-db:5432"
+  # Причина поломки — для людей, в комментарии: аннотация в объекте была бы
+  # подсказкой агенту, который читает манифест. Здесь: init-контейнер бесконечно ждёт несуществующий сервис payments-db:5432.
 spec:
   backoffLimit: 4
   # activeDeadlineSeconds намеренно отсутствует — см. комментарий выше.

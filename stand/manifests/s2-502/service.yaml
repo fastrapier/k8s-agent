@@ -21,8 +21,8 @@ metadata:
   labels:
     app: web
     stand.k8s-incident-agent/scenario: s2
-  annotations:
-    stand.k8s-incident-agent/root-cause: "selector сервиса (version=v1) не совпадает с метками подов (version=v2)"
+  # Причина поломки — для людей, в комментарии: аннотация в объекте была бы
+  # подсказкой агенту, который читает манифест. Здесь: selector сервиса (version=v1) не совпадает с метками подов (version=v2).
 spec:
   selector:
     app: web

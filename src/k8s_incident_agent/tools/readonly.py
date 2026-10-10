@@ -516,6 +516,16 @@ def k8s_rollout_history(
     return _guard("k8s_rollout_history", args, store, work)
 
 
+def _drop_noise(obj: dict) -> dict:
+    """managedFields и last-applied-configuration — служебные копии манифеста: в манифесте api они
+    занимали 6 из 7.7 тыс. символов, и до модели доходила выдержка без env. Для диагностики в
+    них нет ничего, чего нет в самом объекте."""
+    meta = obj.get("metadata") or {}
+    meta.pop("managedFields", None)
+    (meta.get("annotations") or {}).pop("kubectl.kubernetes.io/last-applied-configuration", None)
+    return obj
+
+
 def k8s_get_manifest(
     kind: str,
     name: str,
@@ -533,7 +543,7 @@ def k8s_get_manifest(
 
     def work() -> ToolResult:
         obj = _read_object(_clients(clients, config), kind, name, namespace)
-        masked = mask_object(obj)
+        masked = _drop_noise(mask_object(obj))
         full_yaml = to_yaml(masked)
         body, truncated = truncate(full_yaml, config.tools.max_output_chars)
         summary = f"манифест {masked.get('kind')} {name} из namespace {namespace}"

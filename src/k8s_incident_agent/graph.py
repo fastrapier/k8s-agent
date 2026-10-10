@@ -122,7 +122,7 @@ class IncidentState(TypedDict, total=False):
 
 
 Tool = Callable[..., Any]
-EVIDENCE_EXCERPT = 1500   # символов сырого вывода на свидетельство в промптах анализа
+EVIDENCE_EXCERPT = 3000   # символов сырого вывода на свидетельство: манифест входит целиком
 
 
 def system(prompt: str, identity: bool = False) -> dict:
