@@ -1,0 +1,36 @@
+# Прошлые инциденты для S5 (ТЗ §2, EVALS §S5): «повтор ранее решённого инцидента».
+# Загружается командой `k8s-agent memory seed` (её делает `make demo-s5`); повторная загрузка безопасна.
+#
+# Две записи намеренно похожи по симптому — обе про CrashLoopBackOff в payments:
+#   - inc-2026-09-14-001 — тот же класс, что S1 на стенде: у api пропала DB_PASSWORD после релиза;
+#   - inc-2026-09-28-001 — «похожий, но другой»: checkout падал по OOMKilled.
+# Агент должен сослаться на первую и отметить, что вторая — другой класс поломки.
+
+- id: inc-2026-09-14-001
+  created_at: "2026-09-14T09:42:00+00:00"
+  namespace: payments
+  kinds: [Deployment]
+  objects: [payments/api]
+  symptoms: Под api в namespace payments в CrashLoopBackOff после релиза v1.4, рестарт каждые 10–20 секунд
+  root_cause: >-
+    В релизе из манифеста Deployment api пропала переменная DB_PASSWORD; приложение при старте пишет
+    «FATAL: environment variable DB_PASSWORD is not set» и завершается с exit 1.
+  fix: >-
+    Вернули env DB_PASSWORD через valueFrom.secretKeyRef на Secret payments-db, ключ password — так же,
+    как у checkout. Раскатка прошла, под Running.
+  fix_applied: true
+  outcome: resolved
+  evidence_ids: [ev-003, ev-005]
+
+- id: inc-2026-09-28-001
+  created_at: "2026-09-28T16:05:00+00:00"
+  namespace: payments
+  kinds: [Deployment]
+  objects: [payments/checkout]
+  symptoms: Под checkout в namespace payments в CrashLoopBackOff, рестарты под нагрузкой
+  root_cause: >-
+    Контейнер checkout убивался по OOMKilled (exit 137): limits.memory 64Mi не хватало на пиковый батч.
+  fix: Подняли resources.limits.memory контейнера checkout до 256Mi.
+  fix_applied: true
+  outcome: resolved
+  evidence_ids: [ev-002, ev-004]

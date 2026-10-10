@@ -14,7 +14,15 @@ from langgraph.types import Command
 
 from k8s_incident_agent.graph import REFUSAL, Agent, build_graph
 from k8s_incident_agent.llm import LLMError
-from k8s_incident_agent.schemas import Hypotheses, PatchProposal, Plan, ReviewVerdict, Route
+from k8s_incident_agent.memory import MemoryStore
+from k8s_incident_agent.schemas import (
+    Hypotheses,
+    IncidentRecord,
+    PatchProposal,
+    Plan,
+    ReviewVerdict,
+    Route,
+)
 from k8s_incident_agent.tools.schemas import ToolResult
 
 S1_PATCH = {"spec": {"template": {"spec": {"containers": [{"name": "api", "env": [
@@ -31,7 +39,7 @@ class FakeLLM:
     """Ответы по схеме (structured) и очередь ответов диагноста (chat с инструментами)."""
 
     def __init__(self, route="diagnose", chat=None, hypotheses=None, verdicts=None,
-                 patch=S1_PATCH, fail: set[str] | None = None):
+                 patch=S1_PATCH, fail: set[str] | None = None, similar=None):
         self.route = route
         default = [{"tool_calls": [tool_call("k8s_list_pods", namespace="payments")]},
                    {"tool_calls": [tool_call("k8s_get_manifest", kind="Deployment", name="api",
@@ -42,6 +50,7 @@ class FakeLLM:
         self.verdicts = list(verdicts or ["ok"])
         self.patch = patch
         self.fail = fail or set()
+        self.similar = similar or []
         self.tool_turns = 0
         self.target = "api"
 
@@ -62,7 +71,7 @@ class FakeLLM:
         if schema is Hypotheses:
             return Hypotheses(hypotheses=self.hypotheses or [{
                 "id": "h-1", "statement": "нет DB_PASSWORD", "evidence_ids": ["ev-001"],
-                "confidence": "high"}])
+                "confidence": "high"}], similar=self.similar)
         if schema is ReviewVerdict:
             verdict = self.verdicts.pop(0) if len(self.verdicts) > 1 else self.verdicts[0]
             return ReviewVerdict(verdict=verdict, gaps=[] if verdict == "ok" else ["логи"])
@@ -103,7 +112,7 @@ def fake_get_manifest(kind, name, namespace=None, *, store, config):
                       summary=evidence.summary, data={"manifest_yaml": API_MANIFEST})
 
 
-def run(llm: FakeLLM, config, resume: str | None = None):
+def run(llm: FakeLLM, config, resume: str | None = None, memory: MemoryStore | None = None):
     applied: list = []
 
     def apply_patch(*args, **kwargs):
@@ -112,7 +121,7 @@ def run(llm: FakeLLM, config, resume: str | None = None):
 
     agent = Agent(llm, config, tools={"k8s_list_pods": fake_list_pods,
                                       "k8s_get_manifest": fake_get_manifest},
-                  apply_patch=apply_patch)
+                  apply_patch=apply_patch, memory=memory)
     graph = build_graph(agent).compile(checkpointer=InMemorySaver())
     cfg = {"configurable": {"thread_id": "t"}}
     graph.invoke({"query": "под api падает", "started": time.time(), "evidence": []}, cfg)
@@ -234,3 +243,59 @@ def test_patch_must_be_grounded_in_evidence(config, name, patch, reason):
     state, applied, interrupted = run(llm, config, resume="approved")
     assert not interrupted and applied == [] and state["proposed_patch"] is None
     assert reason in state["recommendation"]
+
+
+# --- Память (М6: F8, S5) ---------------------------------------------------------------------
+
+PAST = IncidentRecord(
+    namespace="payments", kinds=["Deployment"], objects=["payments/api"],
+    symptoms="под api падает в CrashLoopBackOff", root_cause="у api пропала переменная DB_PASSWORD",
+    fix="вернули env DB_PASSWORD из secretKeyRef", fix_applied=True, outcome="resolved",
+    evidence_ids=["ev-003"])
+
+
+def test_applied_fix_is_remembered_and_reported(config):
+    """F8: после применённого и проверенного фикса — запись resolved, id в отчёте."""
+    memory = MemoryStore()
+    state, _, _ = run(FakeLLM(), config, resume="approved", memory=memory)
+    stored = memory.get(state["incident_id"])
+    assert stored.outcome == "resolved" and stored.objects == ["payments/api"]
+    assert "DB_PASSWORD" in stored.fix and "secretKeyRef" in stored.fix
+    assert state["incident_id"] in state["report"]
+
+
+def test_rejected_fix_is_stored_but_not_searchable(config):
+    memory = MemoryStore()
+    state, _, _ = run(FakeLLM(), config, resume="rejected", memory=memory)
+    assert memory.get(state["incident_id"]).outcome == "unresolved"
+    assert memory.search("под api падает") == []
+
+
+def test_repeated_incident_supersedes_previous_record(config):
+    memory = MemoryStore()
+    first, _, _ = run(FakeLLM(), config, resume="approved", memory=memory)
+    second, _, _ = run(FakeLLM(), config, resume="approved", memory=memory)
+    assert [p.id for p in memory.search("под api падает")] == [second["incident_id"]]
+    assert first["incident_id"] != second["incident_id"]
+
+
+def test_similar_past_incident_reaches_report(config):
+    """S5: прошлый случай найден, аналитик отметил класс и отличие, ссылка — в отчёте."""
+    memory = MemoryStore()
+    past_id = memory.write(PAST, created_at="2026-09-14T10:00:00+00:00")
+    llm = FakeLLM(similar=[
+        {"incident_id": past_id, "same_class": True, "difference": "сейчас другой релиз"},
+        {"incident_id": "inc-1999-01-01-001", "same_class": True, "difference": "выдумка"}])
+    state, _, _ = run(llm, config, resume="rejected", memory=memory)
+    assert [s["id"] for s in state["similar_incidents"]] == [past_id]   # выдуманный id отброшен
+    assert past_id in state["report"] and "сейчас другой релиз" in state["report"]
+    assert "inc-1999-01-01-001" not in state["report"]
+
+
+def test_memory_search_is_filtered_by_incident_namespace(config):
+    memory = MemoryStore()
+    memory.write(PAST.model_copy(update={"namespace": "billing", "objects": ["billing/api"]}))
+    llm = FakeLLM(similar=[{"incident_id": "inc-x", "same_class": True, "difference": "-"}])
+    state, _, _ = run(llm, config, resume="rejected", memory=memory)
+    assert state["similar_incidents"] == []
+    assert "похожих инцидентов нет" in state["report"]

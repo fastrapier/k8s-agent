@@ -1,6 +1,7 @@
 """CLI `k8s-agent`.
 
 * `k8s-agent run "<описание проблемы>"` — расследование инцидента графом агента (М4);
+* `k8s-agent memory list|search|seed` — эпизодическая память прошлых инцидентов (М6);
 * `k8s-agent config show` — печать конфига с замаскированным токеном;
 * `k8s-agent tool <имя> [аргументы]` — прямой вызов одного read-only инструмента, без графа и LLM.
 """
@@ -31,6 +32,8 @@ app = typer.Typer(
 )
 config_app = typer.Typer(no_args_is_help=True, help="Конфигурация.")
 app.add_typer(config_app, name="config")
+memory_app = typer.Typer(no_args_is_help=True, help="Эпизодическая память прошлых инцидентов.")
+app.add_typer(memory_app, name="memory")
 
 console = Console()
 
@@ -45,6 +48,43 @@ def config_show() -> None:
         for key, value in values.items():
             table.add_row(f"{section}.{key}", "не задано" if value is None else str(value))
     console.print(table)
+
+
+def _memory():
+    from k8s_incident_agent.memory import MemoryStore
+
+    return MemoryStore(find_repo_root() / "data" / "memory.sqlite",
+                       cluster=get_config().k8s.context)
+
+
+@memory_app.command("list")
+def memory_list() -> None:
+    """Все записи, новые сверху; замещённые и unresolved помечены."""
+    table = Table("id", "namespace", "объекты", "исход", "причина", title="data/memory.sqlite")
+    for row in _memory().all():
+        outcome = row["outcome"] + (f" → {row['superseded_by']}" if row["superseded_by"] else "")
+        table.add_row(row["id"], row["namespace"] or "", ", ".join(json.loads(row["objects"])),
+                      outcome, escape(row["root_cause"][:80]))
+    console.print(table)
+
+
+@memory_app.command("search")
+def memory_search(
+    query: str = typer.Argument(..., help="симптом, как в жалобе"),
+    namespace: str | None = typer.Option(None, "--ns", "--namespace", help="фильтр namespace"),
+) -> None:
+    """Поиск похожих — тот же, что делает аналитик перед гипотезами."""
+    found = _memory().search(query, namespace)
+    for rank, past in enumerate(found, 1):
+        console.print(f"[bold]{rank}.[/bold] {escape(past.brief())}", highlight=False)
+    if not found:
+        console.print("ничего не найдено")
+
+
+@memory_app.command("seed")
+def memory_seed(path: str = typer.Argument(..., help="YAML со списком инцидентов")) -> None:
+    """Загрузить фикстуру прошлых инцидентов (S5). Повторная загрузка безопасна."""
+    console.print("загружено: " + ", ".join(_memory().seed(Path(path))))
 
 
 @app.command("tool")
@@ -143,7 +183,9 @@ def _progress(node: str, change: dict) -> str:
         new = ", ".join(e["id"] for e in change.get("evidence", [])) or "новых нет"
         return f"свидетельства: {new} (вызовов инструментов всего: {change.get('tool_calls')})"
     if node == "analyze":
-        return f"гипотез: {len(change.get('hypotheses', []))}"
+        same = [s["id"] for s in change.get("similar_incidents", []) if s["same_class"]]
+        return (f"гипотез: {len(change.get('hypotheses', []))}"
+                + (f", похожие в памяти: {', '.join(same)}" if same else ""))
     if node == "review":
         return f"ревью: {change.get('review_verdict')} (итерация {change.get('review_iterations')})"
     if node == "propose":
@@ -154,6 +196,9 @@ def _progress(node: str, change: dict) -> str:
     if node == "execute":
         result = change.get("execution_result")
         return f"исполнение: {result['status']}" if result else "исполнение: не выполнялось"
+    if node == "remember":
+        incident = change.get("incident_id")
+        return f"записано в память: {incident}" if incident else "в память не записано"
     return ""
 
 
@@ -180,13 +225,14 @@ def run_incident(
     checkpoints = find_repo_root() / "data" / "checkpoints.sqlite"
     checkpoints.parent.mkdir(exist_ok=True)
     llm = LLMClient(config, model=model)
-    agent = Agent(llm, config)
+    agent = Agent(llm, config, memory=_memory())
     console.print(f"[dim]инцидент {thread_id}, модель {llm.model}[/dim]")
 
     with SqliteSaver.from_conn_string(str(checkpoints)) as saver:
         graph = build_graph(agent).compile(checkpointer=saver)
         run_config = {"configurable": {"thread_id": thread_id}}
-        payload: object = {"query": query, "started": time.time(), "evidence": []}
+        payload: object = {"query": query, "started": time.time(), "evidence": [],
+                           "thread_id": thread_id}
         pending = None
         if thread:
             # --thread — только чтобы ответить на ждущее подтверждение. Новый запрос поверх
