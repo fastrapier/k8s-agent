@@ -4,6 +4,7 @@
 #   №1  учётка диагноста не может писать в кластер (RBAC);
 #   №3  значение Secret не попадает в вывод инструментов: рубеж 1 — RBAC, рубеж 2 — маскирование;
 #   №4  контейнер агента: не root, read-only rootfs, без capabilities, seccomp, только нужные тома.
+#   №5  сеть агента: наружу только LLM-шлюз и API-сервер, и только через egress-proxy.
 #
 # Права проверяются через сами kubeconfig'и учёток, а не через `kubectl --as=...` от админа:
 # `--as` проверяет правила RBAC, но не то, под чем агент реально ходит в кластер.
@@ -118,25 +119,71 @@ grep -E "^(CapBnd|NoNewPrivs|Seccomp):" /proc/self/status | tr -d ' \t'
 echo "mounts=$(awk '$5 !~ "^/(proc|sys|dev)(/|$)" && $5 !~ "^/etc/(hosts|hostname|resolv[.]conf)$" && $5 != "/" { split($6, o, ","); print $5 ":" o[1] }' /proc/self/mountinfo | sort | paste -sd, -)"
 SH
 )"
-expect_probe() { # expect_probe <строка> <что она значит>
-  if grep -qx "$1" <<<"$probe"; then pass "$2: $1"
-  else fail "$2: ожидалось $1, получено: $(grep -E "^${1%%[=:]*}[=:]" <<<"$probe" || tail -1 <<<"$probe")"; fi
+expect_in() { # expect_in <вывод замеров> <ожидаемая строка> <что она значит>
+  if grep -qx "$2" <<<"$1"; then pass "$3: $2"
+  else fail "$3: ожидалось $2, получено: $(grep -E "^${2%%[=:]*}[=:]" <<<"$1" || tail -1 <<<"$1")"; fi
 }
-expect_probe "uid=10001" "не root"
-expect_probe "rootfs=ro" "корневая ФС только для чтения"
-expect_probe "CapBnd:0000000000000000" "capabilities сброшены (cap_drop ALL)"
-expect_probe "NoNewPrivs:1" "повышение привилегий запрещено (no-new-privileges)"
-expect_probe "Seccomp:2" "профиль seccomp включён"
-expect_probe "mounts=/app/.kube/agent-ro.kubeconfig:ro,/tmp:rw" \
+expect_in "$probe" "uid=10001" "не root"
+expect_in "$probe" "rootfs=ro" "корневая ФС только для чтения"
+expect_in "$probe" "CapBnd:0000000000000000" "capabilities сброшены (cap_drop ALL)"
+expect_in "$probe" "NoNewPrivs:1" "повышение привилегий запрещено (no-new-privileges)"
+expect_in "$probe" "Seccomp:2" "профиль seccomp включён"
+expect_in "$probe" "mounts=/app/.kube/agent-ro.kubeconfig:ro,/tmp:rw" \
   "смонтированы только kubeconfig диагноста (ro) и /tmp — ни docker.sock, ни лишних томов"
 
-# Агент в этих ограничениях работает, и в контейнере он тоже под учёткой диагноста.
+# Агент в этих ограничениях работает (к API-серверу — через egress-proxy, см. №5),
+# и в контейнере он тоже под учёткой диагноста.
 c_out="$(compose run --rm -e COLUMNS=100000 agent tool k8s_list_pods --ns "$NAMESPACE" 2>&1)" && rc=0 || rc=$?
 if [ "$rc" -eq 0 ] && grep -q '^ok ' <<<"$c_out"; then pass "k8s_list_pods из контейнера → ok"
 else fail "k8s_list_pods из контейнера → код $rc: $(tail -1 <<<"$c_out")"; fi
 c_out="$(compose run --rm -e COLUMNS=100000 agent tool k8s_get_manifest --kind Secret --name payments-db --ns "$NAMESPACE" 2>&1)" && rc=0 || rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'нет прав' <<<"$c_out"; then pass "Secret из контейнера → отказ RBAC (учётка диагноста)"
 else fail "Secret из контейнера → код $rc, отказа RBAC нет: $(tail -1 <<<"$c_out")"; fi
+
+log "№5 Сеть агента: наружу только через egress-proxy и только к двум адресам"
+# LLM-шлюз — первое имя в allow-list прокси, кроме API-сервера.
+llm_host="$(grep -v control-plane "$STAND_DIR/egress-proxy/allowlist" | head -1)"
+# Python сам сводит результат к одному слову: reachable — получен любой HTTP-ответ,
+# denied — прокси ответил 403, unreachable — до адреса не дойти вовсе.
+net="$(compose run --rm -T -e LLM_HOST="$llm_host" --entrypoint python agent - 2>&1 <<'PY'
+import os, socket, urllib.request, urllib.error
+
+def get(url, proxy=True):
+    handlers = [] if proxy else [urllib.request.ProxyHandler({})]
+    try:
+        urllib.request.build_opener(*handlers).open(url, timeout=8)
+        return "reachable"
+    except urllib.error.HTTPError:
+        return "reachable"
+    except Exception as exc:
+        return "denied" if "403" in str(exc) else "unreachable"
+
+def tcp(ip, port):
+    try:
+        socket.create_connection((ip, port), timeout=4).close()
+        return "reachable"
+    except OSError:
+        return "unreachable"
+
+def dns(name):
+    try:
+        socket.gethostbyname(name)
+        return "resolved"
+    except OSError:
+        return "none"
+
+print("llm_via_proxy=" + get(f"https://{os.environ['LLM_HOST']}/v1/models"))
+print("foreign_via_proxy=" + get("https://example.com/"))
+print("kubelet_via_proxy=" + get("https://k8s-incident-agent-control-plane:10250/"))
+print("foreign_direct_ip=" + tcp("1.1.1.1", 443))
+print("foreign_dns=" + dns("example.com"))
+PY
+)"
+expect_in "$net" "llm_via_proxy=reachable" "LLM-шлюз $llm_host через прокси доступен"
+expect_in "$net" "foreign_via_proxy=denied" "посторонний адрес через прокси → 403"
+expect_in "$net" "kubelet_via_proxy=denied" "kubelet (10250) на той же ноде через прокси → 403"
+expect_in "$net" "foreign_direct_ip=unreachable" "напрямую по IP мимо прокси → маршрута нет"
+expect_in "$net" "foreign_dns=none" "внешние имена напрямую не резолвятся"
 
 echo
 if [ "$failures" -eq 0 ]; then

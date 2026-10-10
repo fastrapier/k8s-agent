@@ -1,9 +1,13 @@
-# Запуск агента в контейнере (ТЗ N2, docs/ISOLATION.md раздел 4).
+name: k8s-incident-agent
+# Запуск агента в контейнере (ТЗ N2, docs/ISOLATION.md разделы 3–4).
 #
 #   make agent-tool TOOL=k8s_list_pods ARGS="--ns payments"
 #
 # Каждая строка ниже снимает одну возможность, которая агенту не нужна. Проверки —
-# `make isolation-test`, раздел «№4 Контейнер».
+# `make isolation-test`, разделы «№4 Контейнер» и «№5 Сеть».
+#
+# Сеть: агент живёт только во внутренней сети agent-egress, у которой нет выхода наружу.
+# Единственный путь из неё — egress-proxy с allow-list из двух адресов: LLM-шлюз и API-сервер.
 
 services:
   agent:
@@ -18,6 +22,10 @@ services:
     mem_limit: 512m                # пик сейчас ~90 МиБ; пересмотреть на М6 (bge-m3)
     tmpfs:
       - /tmp:size=64m              # nosuid, nodev, noexec Docker ставит на tmpfs сам
+    environment:
+      # И клиент kubernetes, и httpx (LLM на М4) сами берут прокси из этих переменных.
+      HTTPS_PROXY: http://egress-proxy:8888
+      HTTP_PROXY: http://egress-proxy:8888
     volumes:
       # Только kubeconfig диагноста, только чтение. Адрес API-сервера в нём — имя ноды kind
       # в docker-сети, а не 127.0.0.1 хоста. Файл выпускает stand/up.sh. Длинная запись —
@@ -29,8 +37,20 @@ services:
         bind:
           create_host_path: false
       # /var/run/docker.sock не монтируется намеренно: с ним контейнер управлял бы хостом.
-    networks: [kind]
+    networks: [agent-egress]
+    depends_on: [egress-proxy]
+
+  egress-proxy:
+    build: stand/egress-proxy
+    image: k8s-incident-agent-egress-proxy:dev
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [agent-egress, kind]  # мост: внутренняя сеть агента ↔ сеть kind с выходом наружу
 
 networks:
+  agent-egress:
+    internal: true                 # без шлюза: прямого выхода наружу нет ни у кого в этой сети
   kind:
-    external: true                 # сеть, которую создаёт kind; в ней живёт API-сервер
+    external: true                 # сеть, которую создаёт kind; в ней API-сервер и выход наружу
