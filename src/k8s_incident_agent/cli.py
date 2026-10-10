@@ -17,6 +17,7 @@ from pathlib import Path
 import typer
 from pydantic import ValidationError
 from rich.console import Console
+from rich.markup import escape
 from rich.syntax import Syntax
 from rich.table import Table
 
@@ -110,9 +111,12 @@ def run_tool(
     result = spec.func(**call_args)
 
     colour = {"ok": "green", "degraded": "yellow", "error": "red"}[result.status]
-    console.print(f"[{colour}]{result.status}[/{colour}] {result.evidence_id}: {result.summary}")
+    # Текст из кластера (логи, события) — данные, а не разметка rich: «[/api]» в логе
+    # иначе уронил бы CLI с MarkupError, а «[api]» молча исчез бы из вывода.
+    console.print(f"[{colour}]{result.status}[/{colour}] {result.evidence_id}: "
+                  f"{escape(result.summary)}")
     if result.error and result.error not in result.summary:
-        console.print(f"[red]{result.error}[/red]")
+        console.print(f"[red]{escape(result.error)}[/red]")
     if result.data is not None:
         payload = json.dumps(result.data, ensure_ascii=False, indent=2)
         console.print(Syntax(payload, "json", theme="ansi_dark", word_wrap=True))
@@ -121,7 +125,7 @@ def run_tool(
     if raw:
         evidence = default_store.get(result.evidence_id)
         if evidence and evidence.raw_ref:
-            console.print(default_store.raw(evidence.raw_ref) or "")
+            console.print(default_store.raw(evidence.raw_ref) or "", markup=False)
 
     if result.status == "error":
         raise typer.Exit(1)

@@ -140,3 +140,24 @@ def test_top_success(config, store):
 
     assert result.status == "ok"
     assert result.data["pods"][0]["containers"][0]["memory"] == "180Mi"
+
+
+def test_cli_prints_cluster_text_verbatim(config, monkeypatch):
+    """Строки логов вида «[api]» и «[/api]» — данные: rich не должен их съедать или падать."""
+
+    def tool(**_kwargs):
+        return ToolResult(
+            tool="test", status="error", evidence_id="ev-1",
+            summary="последняя: [api] FATAL [/api]", error="[/oops] отказ",
+        )
+
+    monkeypatch.setattr(cli, "get_config", lambda: config)
+    monkeypatch.setattr(
+        cli, "READONLY_TOOLS", {"test": ToolSpec("test", tool, ToolArgs, "тестовый инструмент")}
+    )
+
+    result = CliRunner().invoke(cli.app, ["tool", "test"])
+
+    assert result.exit_code == 1, result.output  # статус error, но без MarkupError
+    assert "[api] FATAL [/api]" in result.output
+    assert "[/oops] отказ" in result.output

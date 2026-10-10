@@ -54,6 +54,11 @@ def api_error(status: int, message: str = "") -> ApiException:
     return exc
 
 
+def log_response(text: str) -> SimpleNamespace:
+    """Ответ `read_namespaced_pod_log(_preload_content=False)`: сырые байты в `.data`."""
+    return SimpleNamespace(data=text.encode("utf-8"))
+
+
 def raising(exc: BaseException):
     """Функция-заглушка, которая всегда бросает переданное исключение."""
 

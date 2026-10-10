@@ -55,6 +55,19 @@ jobs:
             exit 1
           fi
           grep -q '\*\*\*masked\*\*\*' demo-s1.txt
+      - name: "S1: k8s_logs --previous приносит FATAL-строку — главное свидетельство"
+        env:
+          COLUMNS: "100000"
+        run: |
+          pod=$(kubectl --context kind-k8s-incident-agent -n payments get pod -l app=api \
+                -o jsonpath='{.items[0].metadata.name}')
+          # Лог предыдущего запуска может быть недоступен в момент рестарта контейнера.
+          for attempt in 1 2 3; do
+            make tool TOOL=k8s_logs ARGS="--pod $pod --ns payments --previous" | tee logs.txt
+            grep -q 'FATAL: environment variable DB_PASSWORD is not set' logs.txt && exit 0
+            sleep 5
+          done
+          exit 1
       - name: k8s_top отдаёт метрики (metrics-server на стенде)
         run: |
           make tool TOOL=k8s_top ARGS="--ns payments" | tee top.txt
