@@ -15,13 +15,19 @@ services:
     security_opt:
       - no-new-privileges:true     # setuid-бинарники не поднимут привилегии
     pids_limit: 256                # зацикливание не съест хост
-    mem_limit: 2g                  # с запасом под bge-m3 на М6
+    mem_limit: 512m                # пик сейчас ~90 МиБ; пересмотреть на М6 (bge-m3)
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=64m
+      - /tmp:size=64m              # nosuid, nodev, noexec Docker ставит на tmpfs сам
     volumes:
       # Только kubeconfig диагноста, только чтение. Адрес API-сервера в нём — имя ноды kind
-      # в docker-сети, а не 127.0.0.1 хоста. Файл выпускает stand/up.sh.
-      - ./.kube/agent-ro.container.kubeconfig:/app/.kube/agent-ro.kubeconfig:ro
+      # в docker-сети, а не 127.0.0.1 хоста. Файл выпускает stand/up.sh. Длинная запись —
+      # чтобы при отсутствии файла была ошибка, а не пустой каталог на его месте.
+      - type: bind
+        source: ./.kube/agent-ro.container.kubeconfig
+        target: /app/.kube/agent-ro.kubeconfig
+        read_only: true
+        bind:
+          create_host_path: false
       # /var/run/docker.sock не монтируется намеренно: с ним контейнер управлял бы хостом.
     networks: [kind]
 

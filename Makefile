@@ -74,6 +74,7 @@ agent-build:  ## собрать образ агента (Dockerfile)
 	docker compose build agent
 
 agent-tool:  ## инструмент из контейнера агента: make agent-tool TOOL=k8s_list_pods ARGS="--ns payments"
+	@test -f .kube/agent-ro.container.kubeconfig || { echo "нет kubeconfig контейнера: make stand-up"; exit 1; }
 	docker compose run --rm agent tool $(TOOL) $(ARGS)
 
 check: lint test  ## всё, что гоняется без кластера

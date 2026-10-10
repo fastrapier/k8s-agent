@@ -24,6 +24,6 @@ RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin agent
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY config.yaml ./
-ENV PATH=/app/.venv/bin:$PATH PYTHONDONTWRITEBYTECODE=1
+ENV PATH=/app/.venv/bin:$PATH
 USER 10001
 ENTRYPOINT ["k8s-agent"]

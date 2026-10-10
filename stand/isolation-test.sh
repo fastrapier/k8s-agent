@@ -3,7 +3,7 @@
 #
 #   №1  учётка диагноста не может писать в кластер (RBAC);
 #   №3  значение Secret не попадает в вывод инструментов: рубеж 1 — RBAC, рубеж 2 — маскирование;
-#   №4  контейнер агента: не root, read-only rootfs, без capabilities, без docker.sock.
+#   №4  контейнер агента: не root, read-only rootfs, без capabilities, seccomp, только нужные тома.
 #
 # Права проверяются через сами kubeconfig'и учёток, а не через `kubectl --as=...` от админа:
 # `--as` проверяет правила RBAC, но не то, под чем агент реально ходит в кластер.
@@ -20,7 +20,7 @@ SECRET_MARKER_B64="$(printf %s "$SECRET_MARKER" | base64)"
 
 require_cluster
 require_cmd uv "Запускайте через make isolation-test: Makefile добавляет ~/.local/bin в PATH."
-for f in "$RO_KUBECONFIG" "$RW_KUBECONFIG"; do
+for f in "$RO_KUBECONFIG" "$RW_KUBECONFIG" "$RO_CONTAINER_KUBECONFIG"; do
   [ -f "$f" ] || die "нет $f. Выпустить kubeconfig'и учёток: $STAND_DIR/up.sh"
 done
 
@@ -86,17 +86,17 @@ can_i "$RW_KUBECONFIG" no  get secrets -n "$NAMESPACE"
 log "№3 Secret через слой инструментов агента"
 out="$(agent_tool k8s_list_pods --ns "$NAMESPACE")" && rc=0 || rc=$?
 if [ "$rc" -eq 0 ] && grep -q '^ok ' <<<"$out"; then pass "k8s_list_pods под учёткой диагноста → ok"
-else fail "k8s_list_pods под учёткой диагноста → код $rc"; fi
+else fail "k8s_list_pods под учёткой диагноста → код $rc: $(tail -1 <<<"$out")"; fi
 
 ro_out="$(agent_tool k8s_get_manifest --kind Secret --name payments-db --ns "$NAMESPACE")" && rc=0 || rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'нет прав' <<<"$ro_out"; then pass "рубеж 1: Secret под учёткой диагноста → отказ RBAC"
-else fail "рубеж 1: Secret под учёткой диагноста → код $rc, отказа RBAC нет"; fi
+else fail "рубеж 1: Secret под учёткой диагноста → код $rc, отказа RBAC нет: $(tail -1 <<<"$ro_out")"; fi
 
 admin_out="$(agent_tool k8s_get_manifest --kind Secret --name payments-db --ns "$NAMESPACE" \
               --kubeconfig "$ADMIN_KUBECONFIG")" && rc=0 || rc=$?
 if [ "$rc" -eq 0 ] && grep -q '\*\*\*masked\*\*\*' <<<"$admin_out"; then
   pass "рубеж 2: тот же Secret под админом → ***masked***"
-else fail "рубеж 2: тот же Secret под админом → код $rc, маски нет"; fi
+else fail "рубеж 2: тот же Secret под админом → код $rc, маски нет: $(tail -1 <<<"$admin_out")"; fi
 
 if grep -qF -e "$SECRET_MARKER" -e "$SECRET_MARKER_B64" <<<"$out$ro_out$admin_out"; then
   fail "значение Secret (открытым текстом или base64) есть в выводе инструментов"
@@ -105,37 +105,38 @@ else pass "значение Secret ни открытым текстом, ни в
 log "№4 Контейнер агента (docker-compose.yml)"
 require_cmd docker "Нужен Docker: в нём живёт и kind, и контейнер агента."
 compose() { docker compose -f "$STAND_DIR/../docker-compose.yml" "$@"; }
-compose build --quiet agent >/dev/null
-[ -f "$RO_CONTAINER_KUBECONFIG" ] || die "нет $RO_CONTAINER_KUBECONFIG. Выпустить: $STAND_DIR/up.sh"
+compose build --quiet agent
 
-# Одна сессия контейнера, несколько замеров. Пишем в /var/tmp, а не в /app: /app принадлежит root,
-# и не-root процесс получил бы отказ даже на записываемой ФС — проверка ничего бы не доказала.
-# Capabilities смотрим в CapBnd: у не-root процесса CapEff и так нулевой, а cap_drop ALL
-# обнуляет именно ограничивающий набор.
-probe="$(compose run --rm --entrypoint sh agent -c '
-  echo "uid=$(id -u)"
-  touch /var/tmp/probe 2>&1 | grep -q "Read-only file system" && echo rootfs=ro || echo rootfs=rw
-  grep -E "^(CapEff|CapBnd|NoNewPrivs):" /proc/self/status | tr -d " \t"
-  [ -e /var/run/docker.sock ] && echo docker_sock=yes || echo docker_sock=no
-' 2>&1)"
+# Одна сессия контейнера, несколько замеров; скрипт идёт через stdin, без слоёв кавычек.
+# Запись — в /var/tmp, а не в /app: /app принадлежит root, и не-root процесс получил бы отказ
+# даже на записываемой ФС. Capabilities — по CapBnd: CapEff у не-root нулевой всегда.
+# Монтирования — списком: так ловится docker.sock по любому пути, лишний том и снятый :ro.
+probe="$(compose run --rm -T --entrypoint sh agent -s 2>&1 <<'SH' || true
+echo "uid=$(id -u)"
+touch /var/tmp/probe 2>&1 | grep -q "Read-only file system" && echo rootfs=ro || echo rootfs=rw
+grep -E "^(CapBnd|NoNewPrivs|Seccomp):" /proc/self/status | tr -d ' \t'
+echo "mounts=$(awk '$5 !~ "^/(proc|sys|dev)(/|$)" && $5 !~ "^/etc/(hosts|hostname|resolv[.]conf)$" && $5 != "/" { split($6, o, ","); print $5 ":" o[1] }' /proc/self/mountinfo | sort | paste -sd, -)"
+SH
+)"
 expect_probe() { # expect_probe <строка> <что она значит>
   if grep -qx "$1" <<<"$probe"; then pass "$2: $1"
-  else fail "$2: ожидалось $1, получено: $(grep -E "^${1%%[=:]*}[=:]" <<<"$probe" || echo нет)"; fi
+  else fail "$2: ожидалось $1, получено: $(grep -E "^${1%%[=:]*}[=:]" <<<"$probe" || tail -1 <<<"$probe")"; fi
 }
 expect_probe "uid=10001" "не root"
 expect_probe "rootfs=ro" "корневая ФС только для чтения"
 expect_probe "CapBnd:0000000000000000" "capabilities сброшены (cap_drop ALL)"
-expect_probe "CapEff:0000000000000000" "действующих capabilities нет"
 expect_probe "NoNewPrivs:1" "повышение привилегий запрещено (no-new-privileges)"
-expect_probe "docker_sock=no" "docker.sock не смонтирован"
+expect_probe "Seccomp:2" "профиль seccomp включён"
+expect_probe "mounts=/app/.kube/agent-ro.kubeconfig:ro,/tmp:rw" \
+  "смонтированы только kubeconfig диагноста (ro) и /tmp — ни docker.sock, ни лишних томов"
 
 # Агент в этих ограничениях работает, и в контейнере он тоже под учёткой диагноста.
-c_out="$(COLUMNS=100000 compose run --rm agent tool k8s_list_pods --ns "$NAMESPACE" 2>&1)" && rc=0 || rc=$?
+c_out="$(compose run --rm -e COLUMNS=100000 agent tool k8s_list_pods --ns "$NAMESPACE" 2>&1)" && rc=0 || rc=$?
 if [ "$rc" -eq 0 ] && grep -q '^ok ' <<<"$c_out"; then pass "k8s_list_pods из контейнера → ok"
-else fail "k8s_list_pods из контейнера → код $rc"; fi
-c_out="$(COLUMNS=100000 compose run --rm agent tool k8s_get_manifest --kind Secret --name payments-db --ns "$NAMESPACE" 2>&1)" && rc=0 || rc=$?
+else fail "k8s_list_pods из контейнера → код $rc: $(tail -1 <<<"$c_out")"; fi
+c_out="$(compose run --rm -e COLUMNS=100000 agent tool k8s_get_manifest --kind Secret --name payments-db --ns "$NAMESPACE" 2>&1)" && rc=0 || rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'нет прав' <<<"$c_out"; then pass "Secret из контейнера → отказ RBAC (учётка диагноста)"
-else fail "Secret из контейнера → код $rc, отказа RBAC нет"; fi
+else fail "Secret из контейнера → код $rc, отказа RBAC нет: $(tail -1 <<<"$c_out")"; fi
 
 echo
 if [ "$failures" -eq 0 ]; then

@@ -26,7 +26,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.4"]   # бэкенд сборки тоже прибит (N6): uv.lock его не фиксирует
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
