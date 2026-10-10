@@ -7,7 +7,7 @@ export PATH := $(HOME)/.local/bin:$(PATH)
 .DEFAULT_GOAL := help
 .PHONY: help install lock test lint lint-fix config-show tool \
         stand-up stand-break stand-status stand-clean stand-down stand demo-s1 \
-        isolation-test agent-build agent-tool check
+        isolation-test agent-build agent-tool eval-models check
 
 help:  ## список целей
 	@grep -hE '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -69,6 +69,11 @@ demo-s1:  ## приёмка М1/М2: api в CrashLoopBackOff, Secret защищ�
 
 isolation-test:  ## приёмка М2: проверки изоляции из docs/ISOLATION.md §10
 	./stand/isolation-test.sh
+
+# --- М3: сравнение моделей -------------------------------------------------
+
+eval-models:  ## М3: сравнение моделей; MODELS=a,b RUNS=3 (по умолчанию 4 кандидата × 3 прогона)
+	uv run python evals/model_selection.py $(if $(MODELS),--models $(MODELS)) $(if $(RUNS),--runs $(RUNS))
 
 agent-build:  ## собрать образ агента (Dockerfile)
 	docker compose build agent
