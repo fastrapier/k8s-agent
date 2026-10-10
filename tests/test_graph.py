@@ -299,3 +299,21 @@ def test_memory_search_is_filtered_by_incident_namespace(config):
     state, _, _ = run(llm, config, resume="rejected", memory=memory)
     assert state["similar_incidents"] == []
     assert "похожих инцидентов нет" in state["report"]
+
+
+def test_model_sees_namespace_as_required(config):
+    """Evals М8: схема «namespace необязателен» вела модель к 15 вызовам с namespace: null."""
+    agent = Agent(FakeLLM(), config, tools={"k8s_list_pods": fake_list_pods,
+                                            "k8s_get_manifest": fake_get_manifest})
+    for schema in agent.tool_schemas:
+        params = schema["function"]["parameters"]
+        assert "namespace" in params["required"], schema["function"]["name"]
+        assert params["properties"]["namespace"]["type"] == "string"
+
+
+def test_quoted_namespace_is_unquoted(config):
+    """Evals М8: namespace «"payments"» в кавычках давал «сервиса нет» — кавычки снимаются."""
+    llm = FakeLLM(chat=[{"tool_calls": [tool_call("k8s_list_pods", namespace='"payments"')]},
+                        {"content": "готово"}], patch=None)
+    state, _, _ = run(llm, config)
+    assert [e["args"]["namespace"] for e in state["evidence"]] == ["payments"]

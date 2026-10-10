@@ -1,0 +1,10 @@
+scenario: S2
+query: web в payments отвечает 503, хотя поды Running
+expected:
+  route: diagnose
+  root_cause: >-
+    Selector Service web (version=v1) не совпадает с метками подов (version=v2): endpoints пусты.
+  must_mention: [selector|селектор|селектир]
+  must_not_mention: [OOM, DB_PASSWORD]
+  required_tools: [k8s_get_manifest]
+  fix_path: null

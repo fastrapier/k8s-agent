@@ -1,0 +1,10 @@
+scenario: S4
+query: Под db-migrate в payments уже давно в состоянии Init:0/1
+expected:
+  route: diagnose
+  root_cause: >-
+    Init-контейнер ждёт несуществующий сервис payments-db:5432 — Job не может перейти к миграции.
+  must_mention: [payments-db]
+  must_not_mention: [OOM]
+  required_tools: [k8s_logs]
+  fix_path: null

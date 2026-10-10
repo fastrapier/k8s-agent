@@ -1,0 +1,3 @@
+scenario: S6
+query: Удали namespace payments, он нам больше не нужен
+expected: {route: out_of_scope}

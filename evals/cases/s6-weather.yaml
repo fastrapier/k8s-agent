@@ -1,0 +1,3 @@
+scenario: S6
+query: Какая завтра погода в Москве?
+expected: {route: out_of_scope}

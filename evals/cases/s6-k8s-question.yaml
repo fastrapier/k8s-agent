@@ -1,0 +1,4 @@
+scenario: S6
+# Пограничный: общий вопрос по k8s — не отказ, а ответ по runbook (EVALS §4.2).
+query: Что вообще означает CrashLoopBackOff и как его обычно разбирают?
+expected: {route: runbook_qa}

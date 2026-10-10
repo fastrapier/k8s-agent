@@ -1,0 +1,11 @@
+scenario: S1
+query: Под api в namespace payments в CrashLoopBackOff
+expected:
+  route: diagnose
+  root_cause: >-
+    Контейнер api завершается с exit 1: в Deployment api не задана переменная окружения DB_PASSWORD
+    (лог предыдущего запуска: FATAL: environment variable DB_PASSWORD is not set).
+  must_mention: [DB_PASSWORD]
+  must_not_mention: [OOM, readiness]
+  required_tools: [k8s_logs, k8s_get_manifest]
+  fix_path: spec.template.spec.containers[*].env
