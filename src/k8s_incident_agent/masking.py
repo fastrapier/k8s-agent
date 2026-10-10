@@ -5,7 +5,7 @@
 
 Что закрывается:
 
-1. `data` / `stringData` у Secret -> `***masked***`;
+1. `data` / `stringData` и аннотации у Secret -> `***masked***`;
 2. `env` с `valueFrom.secretKeyRef` -> имя ключа остаётся, значение не остаётся;
 3. эвристика по содержимому логов: длинный base64, `AKIA...`, `Bearer ...`, `token=...`.
 """
@@ -75,8 +75,9 @@ def _is_secret(node: dict[str, Any], forced: bool) -> bool:
 def mask_object(node: Any, _forced_secret: bool = False) -> Any:
     """Рекурсивно маскирует манифест или список манифестов.
 
-    `_forced_secret` протаскивается внутрь элементов SecretList: у элементов списка,
-    который вернул API-сервер, поле `kind` обычно пустое.
+    `_forced_secret` протаскивается внутрь элементов SecretList (у элементов списка,
+    который вернул API-сервер, поле `kind` обычно пустое) и во вложенные узлы Secret:
+    так `metadata.annotations` узнаёт, что лежит внутри Secret.
     """
     if isinstance(node, list):
         return [mask_object(item, _forced_secret) for item in node]
@@ -94,10 +95,16 @@ def mask_object(node: Any, _forced_secret: bool = False) -> Any:
             # даже если kind по какой-то причине потерян.
             result[key] = _mask_secret_payload(value)
             continue
+        if key == "annotations" and secret:
+            # `kubectl apply` копирует исходный манифест Secret вместе со `stringData`
+            # в аннотацию last-applied-configuration. Поэтому аннотации Secret
+            # маскируются целиком, как `data`: имена видны, значения — нет.
+            result[key] = _mask_secret_payload(value)
+            continue
         if key == "items":
             result[key] = mask_object(value, items_forced)
             continue
-        result[key] = mask_object(value, _forced_secret)
+        result[key] = mask_object(value, secret)
 
     # env-переменная, значение которой приходит из Secret: имя ключа оставляем,
     # значение — нет (ISOLATION §6). В манифесте `value` рядом с `valueFrom` быть
