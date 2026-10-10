@@ -84,10 +84,20 @@ class Plan(Strict):
     steps: list[PlanStep] = Field(min_length=1, max_length=8)
 
 
+class SimilarIncident(Strict):
+    """Суждение аналитика о прошлом инциденте из памяти (S5, MEMORY §3.3: переранжирование)."""
+
+    incident_id: str = Field(description="id прошлого инцидента из списка: inc-...")
+    same_class: bool = Field(description="тот же ли это класс поломки, что сейчас")
+    difference: str = Field(description="чем текущий случай отличается от прошлого")
+
+
 class Hypotheses(Strict):
     """Ответ аналитика (F4): гипотезы, каждая со ссылками на свидетельства."""
 
     hypotheses: list[Hypothesis] = Field(min_length=1, max_length=3)
+    similar: list[SimilarIncident] = Field(
+        default_factory=list, description="оценка каждого прошлого инцидента из памяти, если даны")
 
 
 class PatchProposal(Strict):

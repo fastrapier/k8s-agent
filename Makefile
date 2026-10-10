@@ -7,7 +7,7 @@ export PATH := $(HOME)/.local/bin:$(PATH)
 .DEFAULT_GOAL := help
 .PHONY: help install lock test lint lint-fix config-show tool \
         stand-up stand-break stand-status stand-clean stand-down stand demo-secrets \
-        demo-s1 demo-s1-container demo-s6 \
+        demo-s1 demo-s1-container demo-s5 demo-s6 memory-list \
         isolation-test agent-build agent-tool eval-models check
 
 help:  ## список целей
@@ -79,6 +79,15 @@ demo-s1-container:  ## то же, но агент в изолированном 
 
 demo-s6:  ## приёмка М4: запрос вне области — вежливый отказ без единого вызова инструментов
 	uv run k8s-agent run "Напиши стихотворение про осень"
+
+# --- М6: память --------------------------------------------------------------
+
+demo-s5:  ## приёмка М6: прошлый инцидент из памяти найден и упомянут в отчёте (S1 должен быть сломан)
+	uv run k8s-agent memory seed evals/fixtures/memory/s5-past-incidents.yaml
+	uv run k8s-agent run "$(S1_QUERY)"
+
+memory-list:  ## записи эпизодической памяти data/memory.sqlite
+	uv run k8s-agent memory list
 
 # --- М2: изоляция -----------------------------------------------------------
 

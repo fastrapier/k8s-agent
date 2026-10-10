@@ -5,8 +5,8 @@
               └─ diagnose ────▶ plan ─▶ diagnose ─▶ analyze ─▶ review
     review ─┬─▶ diagnose           (не хватает фактов, итераций < потолка)
             ├─▶ analyze            (гипотеза объясняет не всё)
-            └─▶ propose ─┬─▶ approval ─▶ execute ─▶ report ─▶ END
-                         └─────────────────────────▶ report   (патча нет)
+            └─▶ propose ─┬─▶ approval ─▶ execute ─▶ remember ─▶ report ─▶ END
+                         └─────────────────────────▶ remember   (патча нет)
 
 Маршрут детерминирован кодом, модель решает только внутри узла. Инварианты проверяет код, а не
 подсказка модели: гипотеза без существующих свидетельств отбрасывается, `execute` не делает
@@ -32,8 +32,10 @@ from k8s_incident_agent.config import AppConfig, get_config
 from k8s_incident_agent.evidence import EvidenceStore
 from k8s_incident_agent.knowledge import agent_file, load_skills, runbook_sections, select_skill
 from k8s_incident_agent.llm import LLMClient, LLMError, Usage
+from k8s_incident_agent.memory import MemoryStore
 from k8s_incident_agent.schemas import (
     Hypotheses,
+    IncidentRecord,
     PatchProposal,
     Plan,
     ReviewVerdict,
@@ -77,7 +79,10 @@ DIAGNOSE = """Ты — диагност. Собирай факты о класт
 
 ANALYZE = """Ты — аналитик. По свидетельствам сформулируй 1–3 гипотезы о корневой причине. Каждая
 гипотеза обязана ссылаться на id свидетельств из списка (ev-001, …); утверждение без свидетельства
-не принимается. Самую обоснованную гипотезу ставь первой."""
+не принимается. Самую обоснованную гипотезу ставь первой.
+Если даны прошлые инциденты из памяти — оцени каждый в similar: тот же ли класс поломки и чем
+текущий случай отличается. Прошлый инцидент — подсказка, а не свидетельство: гипотеза ссылается
+только на ev-…, а прошлый фикс мог устареть."""
 
 REVIEW = """Ты — ревьюер отчёта о причине инцидента. Проверь:
 1. каждое утверждение гипотезы подкреплено указанными свидетельствами;
@@ -109,6 +114,7 @@ class IncidentState(TypedDict, total=False):
     gaps: list[str]
     review_verdict: str
     review_iterations: int
+    similar_incidents: list[dict]   # прошлые инциденты из памяти с суждением аналитика (S5)
     proposed_patch: dict | None
     recommendation: str
     approval_status: str
@@ -118,6 +124,8 @@ class IncidentState(TypedDict, total=False):
     cost: float
     budget_exhausted: bool
     notes: Annotated[list[str], operator.add]   # что пошло не так: попадает в отчёт
+    incident_id: str | None                     # запись в эпизодической памяти (F8)
+    thread_id: str
     report: str
 
 
@@ -137,7 +145,8 @@ class Agent:
 
     def __init__(self, llm: LLMClient, config: AppConfig | None = None,
                  tools: dict[str, Tool] | None = None,
-                 apply_patch: Callable[..., dict] | None = None) -> None:
+                 apply_patch: Callable[..., dict] | None = None,
+                 memory: MemoryStore | None = None) -> None:
         self.llm = llm
         self.config = config or get_config()
         # Диагносту видны только read-only инструменты: k8s_patch здесь нет (ISOLATION L3, §10 №2).
@@ -149,6 +158,8 @@ class Agent:
         ]
         self.apply_patch = apply_patch or write_contour.apply_patch
         self.store = EvidenceStore()   # агент создаётся на один инцидент
+        # Долгосрочная память — файл; CLI передаёт data/memory.sqlite, по умолчанию пустая в ОЗУ.
+        self.memory = memory if memory is not None else MemoryStore()
 
     # --- служебное ---
 
@@ -168,6 +179,13 @@ class Agent:
 
     def _over_time(self, state: IncidentState) -> bool:
         return time.time() - state["started"] > self.config.budget.max_seconds
+
+    @staticmethod
+    def _namespace(state: IncidentState) -> str | None:
+        """Namespace инцидента — тот, который диагност называл в вызовах чаще всего."""
+        names = [e["args"].get("namespace") for e in state.get("evidence", [])]
+        names = [n for n in names if n]
+        return max(set(names), key=names.count) if names else None
 
     def _evidence_text(self, state: IncidentState, detail: bool = False) -> str:
         """Свидетельства для промпта. detail — с выдержкой сырого вывода: аналитику и автору
@@ -294,16 +312,25 @@ class Agent:
         return body
 
     def analyze(self, state: IncidentState) -> dict:
+        """Гипотезы (F4) и прошлые инциденты (S5): поиск — кодом по памяти с фильтром namespace,
+        суждение «тот же класс / чем отличается» — моделью в том же вызове."""
         usage = Usage()
-        result = self.llm.structured([
-            system(ANALYZE),
-            {"role": "user", "content": f"Запрос: {state['query']}\n\nСвидетельства:\n"
-                                        f"{self._evidence_text(state, detail=True)}"}],
-            Hypotheses, usage)
+        past = {p.id: p for p in self.memory.search(state["query"], self._namespace(state))}
+        content = (f"Запрос: {state['query']}\n\nСвидетельства:\n"
+                   f"{self._evidence_text(state, detail=True)}")
+        if past:
+            content += "\n\nПрошлые инциденты из памяти:\n" + "\n".join(
+                p.brief() for p in past.values())
+        result = self.llm.structured([system(ANALYZE), {"role": "user", "content": content}],
+                                     Hypotheses, usage)
         known = {e["id"] for e in state.get("evidence", [])}
         # Инвариант F4 проверяется кодом: ссылки только на существующие свидетельства.
         valid = [h.model_dump() for h in result.hypotheses if set(h.evidence_ids) <= known]
-        return {"hypotheses": valid, **self._usage(state, usage)}
+        # Так же и с памятью: ссылка только на инцидент, который поиск действительно вернул.
+        similar = [{**vars(past[s.incident_id]), "same_class": s.same_class,
+                    "difference": s.difference}
+                   for s in result.similar if s.incident_id in past]
+        return {"hypotheses": valid, "similar_incidents": similar, **self._usage(state, usage)}
 
     def review(self, state: IncidentState) -> dict:
         usage = Usage()
@@ -399,6 +426,30 @@ class Agent:
                                                      p["patch"], expected=p.get("expected"),
                                                      config=self.config)}
 
+    def remember(self, state: IncidentState) -> dict:
+        """memory_writer (F8). Запись собирается кодом из состояния: причина уже структурирована
+        аналитиком и проверена ревьюером, второй пересказ моделью добавил бы только ошибок.
+        В поиск попадает только исправление, подтверждённое исполнением и пост-проверкой."""
+        hypotheses = state.get("hypotheses") or []
+        if not hypotheses:
+            return {"incident_id": None}   # причина не установлена — запоминать нечего
+        patch = state.get("proposed_patch")
+        applied = (state.get("execution_result") or {}).get("status") == "applied"
+        namespace = patch["namespace"] if patch else self._namespace(state)
+        fix = state.get("recommendation") or "—"
+        if patch:
+            # Патч — каноническим JSON: одинаковый фикс одного объекта даёт одинаковую строку,
+            # и повтор замещает старую запись, а не плодит дубли (MEMORY §3.2).
+            fix = f"{patch['kind']}/{patch['name']}: " + json.dumps(
+                patch["patch"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        record = IncidentRecord(
+            namespace=namespace or "", kinds=[patch["kind"]] if patch else [],
+            objects=[f"{patch['namespace']}/{patch['name']}"] if patch else [],
+            symptoms=state["query"], root_cause=hypotheses[0]["statement"], fix=fix,
+            fix_applied=applied, outcome="resolved" if applied else "unresolved",
+            evidence_ids=hypotheses[0]["evidence_ids"])
+        return {"incident_id": self.memory.write(record, trace_id=state.get("thread_id"))}
+
     def report(self, state: IncidentState) -> dict:
         return {"report": render_report(state)}
 
@@ -442,8 +493,10 @@ def render_report(state: IncidentState) -> str:
         result = state.get("execution_result")
         lines.append(f"Подтверждение: {status}." + (f" Результат: {result['status']} — "
                                                      f"{result['detail']}" if result else ""))
-    lines += ["", "## Похожие инциденты", "", "память подключается на М6", "",
-              "## Потрачено", "",
+    lines += ["", "## Похожие инциденты", ""] + _similar_lines(state)
+    if state.get("incident_id"):
+        lines.append(f"\nЗаписано в память: `{state['incident_id']}`.")
+    lines += ["", "## Потрачено", "",
               f"- вызовов инструментов: {state.get('tool_calls', 0)}",
               f"- вызовов модели: {state.get('llm_calls', 0)}, "
               f"стоимость ${state.get('cost', 0.0):.4f}",
@@ -453,6 +506,21 @@ def render_report(state: IncidentState) -> str:
     if state.get("notes"):
         lines += ["", "## Ограничения", ""] + [f"- {note}" for note in state["notes"]]
     return "\n".join(lines)
+
+
+def _similar_lines(state: IncidentState) -> list[str]:
+    similar = state.get("similar_incidents") or []
+    if not similar:
+        return ["В памяти похожих инцидентов нет."]
+    lines = []
+    for s in sorted(similar, key=lambda s: not s["same_class"]):
+        head = f"- `{s['id']}` от {s['created_at'][:10]}"
+        if s["same_class"]:
+            lines += [f"{head} — тот же класс поломки.", f"  - тогда: {s['root_cause']}",
+                      f"  - помогло: {s['fix']}", f"  - отличие: {s['difference']}"]
+        else:
+            lines.append(f"{head} — другой случай: {s['difference']}")
+    return lines
 
 
 def build_graph(agent: Agent) -> StateGraph:
@@ -472,6 +540,7 @@ def build_graph(agent: Agent) -> StateGraph:
         "proposed_patch": None, "recommendation": "Модель не дала предложение по исправлению."}))
     graph.add_node("approval", agent.approval)
     graph.add_node("execute", agent.execute)
+    graph.add_node("remember", agent.remember)
     graph.add_node("report", agent.report)
 
     graph.add_edge(START, "classify")
@@ -485,8 +554,9 @@ def build_graph(agent: Agent) -> StateGraph:
     graph.add_edge("analyze", "review")
     graph.add_conditional_edges("review", agent.after_review)
     graph.add_conditional_edges("propose",
-                                lambda s: "approval" if s.get("proposed_patch") else "report")
+                                lambda s: "approval" if s.get("proposed_patch") else "remember")
     graph.add_edge("approval", "execute")
-    graph.add_edge("execute", "report")
+    graph.add_edge("execute", "remember")
+    graph.add_edge("remember", "report")
     graph.add_edge("report", END)
     return graph
