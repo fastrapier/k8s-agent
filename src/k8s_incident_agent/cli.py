@@ -137,7 +137,8 @@ def _progress(node: str, change: dict) -> str:
     if node == "classify":
         return f"маршрут: {change.get('route')}"
     if node == "plan":
-        return "план: " + "; ".join(step["goal"] for step in change.get("plan", []))
+        skill = f"скилл {change['active_skill']}; " if change.get("active_skill") else ""
+        return skill + "план: " + "; ".join(step["goal"] for step in change.get("plan", []))
     if node == "diagnose":
         new = ", ".join(e["id"] for e in change.get("evidence", [])) or "новых нет"
         return f"свидетельства: {new} (вызовов инструментов всего: {change.get('tool_calls')})"
@@ -162,6 +163,7 @@ def run_incident(
     thread: str | None = typer.Option(
         None, "--thread", help="id инцидента, ждущего подтверждения патча: продолжить его"),
     model: str | None = typer.Option(None, "--model", help="модель вместо llm.model из конфига"),
+    show_skill: bool = typer.Option(False, "--show-skill", help="напечатать подключённый скилл"),
 ) -> None:
     """Расследовать инцидент. Патч применяется только после вашего подтверждения."""
     if not query and not thread:
@@ -170,6 +172,7 @@ def run_incident(
     from langgraph.types import Command
 
     from k8s_incident_agent.graph import Agent, build_graph
+    from k8s_incident_agent.knowledge import load_skills
     from k8s_incident_agent.llm import LLMClient
 
     config = get_config()
@@ -202,6 +205,11 @@ def run_incident(
                             pending = change[0].value
                         elif line := _progress(node, change):
                             console.print(f"[cyan]{node:>9}[/cyan] {escape(line)}")
+                        if show_skill and node == "plan" and (change or {}).get("active_skill"):
+                            skill = next(s for s in load_skills()
+                                         if s.name == change["active_skill"])
+                            console.print(Markdown(f"**Скилл {skill.name}** — {skill.description}"
+                                                   f"\n\n{skill.body}"))
             if pending is None:
                 break
             # F6: человек видит объект, патч, обоснование и свидетельства — и решает сам.

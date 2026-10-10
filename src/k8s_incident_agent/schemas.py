@@ -66,6 +66,13 @@ class Route(Strict):
     reason: str
 
 
+class RunbookPick(Strict):
+    """Выбор раздела runbook по оглавлению (PageIndex, MEMORY §4)."""
+
+    section: int = Field(description="номер раздела в оглавлении")
+    reason: str
+
+
 class PlanStep(Strict):
     goal: str = Field(description="какой факт нужно установить")
     tool_hint: str = Field(description="каким инструментом его скорее всего получить")
