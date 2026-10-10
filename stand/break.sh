@@ -83,12 +83,14 @@ break_s3() {
 check_s4() {
   local state
   state="$(kc get pods -n "$NAMESPACE" -l job-name=db-migrate \
-            -o jsonpath='{.items[0].status.initContainerStatuses[0].state.running.startedAt}' 2>/dev/null || true)"
+            -o jsonpath='{.items[*].status.initContainerStatuses[*].state.running.startedAt}' 2>/dev/null || true)"
   [ -n "$state" ]
 }
 
 break_s4() {
   log "S4 — Job не завершается: init-контейнер ждёт несуществующий сервис payments-db:5432"
+  # Упавший Job не оживёт от apply. Ждём удаления его подов, чтобы не принять старый за симптом.
+  kc delete job db-migrate -n "$NAMESPACE" --ignore-not-found --cascade=foreground --wait=true
   kc apply -f "$MANIFESTS_DIR/s4-stuck-job/"
   # Симптом: под Job висит в Init:0/1, init-контейнер в состоянии Running и не готов.
   wait_for "под job db-migrate завис в Init (init-контейнер wait-for-db работает)" check_s4

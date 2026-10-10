@@ -78,9 +78,13 @@ fi
 # S4
 if kc get job db-migrate -n "$NAMESPACE" >/dev/null 2>&1; then
   st="$(kc get pods -n "$NAMESPACE" -l job-name=db-migrate \
-        -o jsonpath='{.items[0].status.initContainerStatuses[0].state.running.startedAt}' 2>/dev/null || true)"
+        -o jsonpath='{.items[*].status.initContainerStatuses[*].state.running.startedAt}' 2>/dev/null || true)"
   comp="$(kc get job db-migrate -n "$NAMESPACE" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
-  if [ -n "$st" ] && [ -z "$comp" ]; then verdict ok "S4 Job не завершается: init-контейнер работает с $st"
+  failed="$(kc get job db-migrate -n "$NAMESPACE" \
+            -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
+  if [ "$failed" = True ]; then
+    verdict partial "S4 Job db-migrate упал (Failed=True), вероятно после перезапуска Docker. Восстановить: make stand-break SCENARIO=s4"
+  elif [ -n "$st" ] && [ -z "$comp" ]; then verdict ok "S4 Job не завершается: есть работающий init-контейнер (startedAt: $st)"
   else verdict partial "S4 Job не завершается: succeeded=${comp:-0}, init started=${st:-нет}"; fi
 else
   verdict absent "S4 Job не завершается"
