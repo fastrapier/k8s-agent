@@ -1,0 +1,54 @@
+# CI на каждый PR (ТЗ раздел 10) и проверка N6 на чистой машине.
+#
+# check — то же, что `make check` у автора: линт и юнит-тесты, кластер не нужен.
+# stand — стенд из чистого клона одной командой и приёмка М1: S1 виден, Secret замаскирован.
+# Системные evals с LLM добавятся на этапе М8.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    name: Линт и юнит-тесты
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.20"
+      - run: uv sync --locked
+      - run: make check
+
+  stand:
+    name: Стенд kind и приёмка М1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.20"
+      # На раннере уже есть kind неизвестной версии; ставим поверх ту же, что у автора.
+      - name: kind v0.33.0
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/kind" https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+          sudo install -m 0755 "$RUNNER_TEMP/kind" /usr/local/bin/kind
+          kind version
+      - run: uv sync --locked
+      - run: make stand
+      - run: make demo-s1 | tee demo-s1.txt
+        env:
+          # Без этого rich переносит строки по 80 символов и разрезает значение Secret:
+          # grep ниже не нашёл бы его даже при утечке. Проверено на коде с известной утечкой.
+          COLUMNS: "100000"
+      - name: Значение Secret не попало в вывод инструментов (N1)
+        run: |
+          if grep -q s3cr3t-do-not-leak demo-s1.txt; then
+            echo "::error::значение Secret payments-db есть в выводе make demo-s1"
+            exit 1
+          fi
+          grep -q '\*\*\*masked\*\*\*' demo-s1.txt

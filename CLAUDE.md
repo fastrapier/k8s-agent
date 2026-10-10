@@ -4,8 +4,9 @@
 
 ### Issue tracker
 
-Issues and specs live as markdown files under `.scratch/<feature>/` in this repo — there is no
-git remote. See `docs/agents/issue-tracker.md`.
+Issues and specs live as markdown files under `.scratch/<feature>/` in this repo. Code changes go
+through PRs on GitHub (`fastrapier/k8s-agent`, public), CI in `.github/workflows/ci.yml`.
+See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
