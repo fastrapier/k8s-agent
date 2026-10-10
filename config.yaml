@@ -12,8 +12,7 @@ budget:
 llm:
   base_url: ${LLM_API_URL}
   api_key: ${LLM_API_TOKEN}
-  # Предварительно, до М3. Базовая линия ТЗ (deepseek-v3.2) на пилотном замере
-  # не вызвала ни одного инструмента — см. .scratch/llm-pilot.md.
+  # Выбрана сравнением моделей (М3, docs/LLM_SELECTION.md §7–8): лучший итог, без дисквалификаторов.
   model: z-ai/glm-5.3
   temperature: 0.0
 

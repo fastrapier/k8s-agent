@@ -165,7 +165,7 @@ class FakeGateway:
         self.replies = list(replies)
         self.seen: list[list[dict]] = []
 
-    def chat(self, model, messages, **kwargs) -> dict:
+    def raw(self, messages, model=None, **kwargs) -> dict:
         self.seen.append([dict(m) for m in messages])
         return {"message": self.replies.pop(0), "latency": 1.0, "cost": 0.001}
 

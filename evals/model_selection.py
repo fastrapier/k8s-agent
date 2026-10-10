@@ -16,11 +16,7 @@ import argparse
 import concurrent.futures
 import json
 import random
-import socket
 import statistics
-import time
-import urllib.error
-import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -28,7 +24,8 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from k8s_incident_agent.config import get_config
+from k8s_incident_agent.llm import TIMEOUT as LLM_TIMEOUT
+from k8s_incident_agent.llm import LLMClient, parse_json
 from k8s_incident_agent.schemas import SCHEMAS
 from k8s_incident_agent.tools import READONLY_TOOLS
 from k8s_incident_agent.tools.readonly import UnsupportedKind, canonical_kind
@@ -36,8 +33,6 @@ from k8s_incident_agent.tools.readonly import UnsupportedKind, canonical_kind
 TASKS_DIR = Path(__file__).parent / "tasks" / "model_selection"
 RESULTS_DIR = Path(__file__).parent / "results" / "model-selection"
 DEFAULT_MODELS = "deepseek-v3.2,z-ai/glm-5.3,qwen3.8-27b,kimi-k3"
-TIMEOUT = 120               # LLM_SELECTION §5: таймаут — провал задачи, а не исключение из выборки
-GATEWAY_RETRIES = 3         # 5xx и 429 повторяются и в статистику не входят
 FORMAT_RETRIES = 2          # ARCHITECTURE §8: повтор с текстом ошибки валидации, максимум 2
 CALLS_PER_INCIDENT = 10     # LLM_SELECTION R5: ~10 вызовов модели на инцидент (до блока E)
 LONG_CONTEXT_TURNS = 3     # блок D: сколько ходов модель может перепроверять до ответа
@@ -83,50 +78,8 @@ KNOWN_TOOLS = {t["function"]["name"] for t in AGENT_TOOLS + EXECUTOR_TOOLS}
 
 
 # --- Вызов шлюза -------------------------------------------------------------------------
-
-class Gateway:
-    def __init__(self) -> None:
-        llm = get_config().llm
-        if not llm.base_url or not llm.api_key:
-            raise SystemExit("нет LLM_API_URL / LLM_API_TOKEN в local.env")
-        self.url = llm.base_url.rstrip("/") + "/chat/completions"
-        self.headers = {
-            "Authorization": "Bearer " + llm.api_key.get_secret_value(),
-            "Content-Type": "application/json",
-        }
-
-    def chat(self, model: str, messages: list, tools: list | None = None,
-             response_format: dict | None = None) -> dict:
-        """Один вызов. Возвращает message, latency, cost; таймаут — {'timeout': True}."""
-        body: dict[str, Any] = {"model": model, "messages": messages, "temperature": 0, "top_p": 1}
-        if tools:
-            body["tools"] = tools
-        if response_format:
-            body["response_format"] = response_format
-        data = json.dumps(body).encode()
-        for attempt in range(GATEWAY_RETRIES + 1):
-            started = time.monotonic()
-            try:
-                request = urllib.request.Request(self.url, data, self.headers)
-                with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-                    payload = json.load(response)
-                return {
-                    "message": payload["choices"][0]["message"],
-                    "latency": time.monotonic() - started,
-                    "cost": float((payload.get("usage") or {}).get("cost") or 0.0),
-                }
-            except TimeoutError:
-                return {"timeout": True, "latency": float(TIMEOUT), "cost": 0.0}
-            except urllib.error.HTTPError as exc:
-                if exc.code not in (429, 500, 502, 503, 504) or attempt == GATEWAY_RETRIES:
-                    return {"error": f"HTTP {exc.code}", "latency": 0.0, "cost": 0.0}
-            except urllib.error.URLError as exc:
-                if isinstance(exc.reason, TimeoutError | socket.timeout):
-                    return {"timeout": True, "latency": float(TIMEOUT), "cost": 0.0}
-                if attempt == GATEWAY_RETRIES:
-                    return {"error": str(exc.reason), "latency": 0.0, "cost": 0.0}
-            time.sleep(2 ** attempt)
-        raise AssertionError("недостижимо")
+# Тот же клиент, что в графе агента (k8s_incident_agent.llm): сравнение меряет ровно тот код,
+# который работает в агенте, — таймауты, повторы при сбоях шлюза, учёт стоимости.
 
 
 # --- Проверка ответов --------------------------------------------------------------------
@@ -185,13 +138,6 @@ def check_tool_choice(expect: dict, message: dict) -> tuple[float, str]:
             return 1.0, f"{name} {args}"
     got = ", ".join(f"{n} {a}" for n, a in calls) or "без вызова"
     return 0.0, f"ожидался {want} {expect.get('args') or {}}, получено: {got}"
-
-
-def parse_json(message: dict) -> Any:
-    text = (message.get("content") or "").strip()
-    if text.startswith("```"):
-        text = text.strip("`").removeprefix("json").strip()
-    return json.loads(text)
 
 
 def check_route(expect: dict, message: dict) -> tuple[float, str, str | None]:
@@ -268,14 +214,14 @@ ROUTE_FORMAT = {"type": "json_schema", "json_schema": {"name": "Route", "schema"
 NO_NEW_DATA = "нет новых данных: этот инструмент вернул то же, что уже есть в истории"
 
 
-def run_task(gateway: Gateway, model: str, letter: str, block: dict, task: dict) -> dict:
+def run_task(gateway: LLMClient, model: str, letter: str, block: dict, task: dict) -> dict:
     """Одна задача. Каждый вызов шлюза пишется отдельно: латентность и цена считаются по вызовам."""
     messages = build_messages(block, task)
     row: dict[str, Any] = {"task": task["id"], "block": letter, "violation": None,
                            "retries": None, "latencies": [], "costs": []}
 
     def chat(**kwargs) -> dict:
-        reply = gateway.chat(model, messages, **kwargs)
+        reply = gateway.raw(messages, model=model, **kwargs)
         row["latencies"].append(reply["latency"])
         row["costs"].append(reply["cost"])
         if "message" in reply:
@@ -340,7 +286,7 @@ def summarize_run(rows: list[dict]) -> dict:
     by_block = {letter: [r["score"] for r in rows if r["block"] == letter] for letter in "ABCD"}
     latencies = sorted(x for r in rows for x in r["latencies"] if x)
     costs = [x for r in rows for x in r["costs"] if x]
-    p95 = latencies[int(0.95 * (len(latencies) - 1))] if latencies else float(TIMEOUT)
+    p95 = latencies[int(0.95 * (len(latencies) - 1))] if latencies else float(LLM_TIMEOUT)
     return {
         **{letter: statistics.mean(s) if s else 0.0 for letter, s in by_block.items()},
         "p95_call": p95,
@@ -408,16 +354,33 @@ def report(models: list[str], runs: dict[str, list[dict]], rows: dict[str, list[
     return "\n".join(lines)
 
 
+def report_from_dir(directory: Path) -> str:
+    """Отчёт по сохранённым ответам — для прогона, который оборвался до конца."""
+    all_runs, all_rows = {}, {}
+    for path in sorted(directory.glob("*.jsonl")):
+        rows = [json.loads(line) for line in path.open(encoding="utf-8")]
+        model = path.stem.replace("_", "/", 1) if path.stem.startswith("z-ai_") else path.stem
+        runs = sorted({row["run"] for row in rows})
+        all_rows[model] = rows
+        all_runs[model] = [summarize_run([r for r in rows if r["run"] == n]) for n in runs]
+    return report(list(all_runs), all_runs, all_rows)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--models", default=DEFAULT_MODELS)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--only", default="", help="через запятую id задач, для отладки")
+    parser.add_argument("--report", default="",
+                        help="собрать отчёт из сохранённых ответов каталога")
     args = parser.parse_args()
+    if args.report:
+        print(report_from_dir(Path(args.report)))
+        return
     models = [m for m in args.models.split(",") if m]
     only = {t for t in args.only.split(",") if t}
 
-    gateway = Gateway()
+    gateway = LLMClient()
     blocks = load_blocks()
     out_dir = RESULTS_DIR / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     out_dir.mkdir(parents=True)
