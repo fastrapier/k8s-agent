@@ -41,7 +41,7 @@ jobs:
       - run: uv sync --locked
       - run: make stand
       - run: make isolation-test
-      - run: make demo-s1 | tee demo-s1.txt
+      - run: make demo-secrets | tee demo-s1.txt
         env:
           # Без этого rich переносит строки по 80 символов и разрезает значение Secret:
           # grep ниже не нашёл бы его даже при утечке. Проверено на коде с известной утечкой.
@@ -51,7 +51,7 @@ jobs:
           # data у Secret приходит из API в base64 — ищем обе формы значения.
           b64=$(printf %s s3cr3t-do-not-leak | base64)
           if grep -qF -e s3cr3t-do-not-leak -e "$b64" demo-s1.txt; then
-            echo "::error::значение Secret payments-db есть в выводе make demo-s1"
+            echo "::error::значение Secret payments-db есть в выводе make demo-secrets"
             exit 1
           fi
           grep -q '\*\*\*masked\*\*\*' demo-s1.txt

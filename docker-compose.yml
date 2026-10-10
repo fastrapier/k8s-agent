@@ -22,8 +22,11 @@ services:
     mem_limit: 512m                # пик сейчас ~90 МиБ; пересмотреть на М6 (bge-m3)
     tmpfs:
       - /tmp:size=64m              # nosuid, nodev, noexec Docker ставит на tmpfs сам
+    env_file:
+      - path: local.env            # токен LLM-шлюза; в CI файла нет — тогда без LLM
+        required: false
     environment:
-      # И клиент kubernetes, и httpx (LLM на М4) сами берут прокси из этих переменных.
+      # И клиент kubernetes, и клиент LLM сами берут прокси из этих переменных.
       HTTPS_PROXY: http://egress-proxy:8888
       HTTP_PROXY: http://egress-proxy:8888
     volumes:
@@ -36,6 +39,14 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # Учётка исполнителя — отдельным файлом (ISOLATION §5); использует её только executor.py.
+      - type: bind
+        source: ./.kube/agent-rw.container.kubeconfig
+        target: /app/.kube/agent-rw.kubeconfig
+        read_only: true
+        bind:
+          create_host_path: false
+      - agent-data:/app/data       # чекпоинты графа: продолжение после подтверждения
       # /var/run/docker.sock не монтируется намеренно: с ним контейнер управлял бы хостом.
     networks: [agent-egress]
     depends_on: [egress-proxy]
@@ -48,6 +59,9 @@ services:
     security_opt:
       - no-new-privileges:true
     networks: [agent-egress, kind]  # мост: внутренняя сеть агента ↔ сеть kind с выходом наружу
+
+volumes:
+  agent-data:
 
 networks:
   agent-egress:

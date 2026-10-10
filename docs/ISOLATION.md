@@ -165,11 +165,15 @@ kind, и забытая настройка тихо превратила бы д
 - фильтр применяется **до** записи свидетельства, то есть незамаскированное значение не попадает
   ни в SQLite, ни в трейс Langfuse.
 
-**Allow-list патчей.** `k8s_patch` проверяет кодом три вещи: kind входит в список разрешённых,
-namespace входит в список разрешённых, и — главное — каждый путь, который трогает JSON-патч, входит
-в белый список путей для этого kind. Например, для `Deployment` разрешены
-`spec.template.spec.containers[*].env`, `spec.replicas`, `spec.template.metadata.annotations`
-и ничего больше.
+**Allow-list патчей** (`src/k8s_incident_agent/executor.py`). Исполнитель проверяет кодом три вещи:
+kind входит в список разрешённых, namespace входит в список разрешённых (`payments`, как и Role
+исполнителя), и — главное — каждый путь, который трогает патч, входит в белый список путей для этого
+kind. Для `Deployment`: `spec.replicas`, `spec.template.metadata.annotations` (rollout restart),
+`spec.template.spec.containers[*].env`, `…containers[*].resources` (OOM) и `…containers[*].name` как
+ключ слияния; для `ConfigMap` — `data`. Образ (`image`) не разрешён намеренно: смена образа — вопрос
+цепочки поставок, а не диагностики. Модели часто присылают патч полным объектом — поля, которые лишь
+называют объект (`apiVersion`, `kind`, `metadata.name/namespace`), снимаются, если совпадают с целью,
+иначе патч отклоняется.
 
 Именно белый список, а не перечень запрещённых полей: чёрный список по определению неполон, и любое
 поле, о котором мы не подумали (`hostPID`, `hostNetwork`, `volumes[].hostPath`, `initContainers`,
@@ -234,7 +238,8 @@ namespace входит в список разрешённых, и — главн
 1. учётка диагноста не может писать: `kubectl --kubeconfig .kube/agent-ro.kubeconfig auth can-i
    patch deployments` → `no` (и ещё 13 строк матрицы прав обеих учёток). **Реализовано:
    `make isolation-test`**, проверяется через сами kubeconfig'и, а не через `--as` от админа;
-2. попытка вызвать `k8s_patch` из контекста диагноста → инструмент не зарегистрирован, ошибка;
+2. попытка вызвать `k8s_patch` из контекста диагноста → инструмент не зарегистрирован, ошибка.
+   **Реализовано: `tests/test_graph.py::test_diagnostician_cannot_call_patch_tool`**;
 3. прогон полного сценария с Secret в манифесте → grep по трейсу и SQLite не находит значение.
    **Частично реализовано: `make isolation-test`** проверяет оба рубежа на выводе инструментов
    (под учёткой диагноста — отказ RBAC, под админом — `***masked***`). Трейс и SQLite появятся
@@ -249,5 +254,9 @@ namespace входит в список разрешённых, и — главн
    `example.com`, на имя шлюза с чужим портом, на kubelet ноды и на обычный HTTP к ноде;
    `1.1.1.1:443` напрямую → `ENETUNREACH`; внешние имена не резолвятся; слушатель на хосте Docker
    из сети агента недоступен (контроль: из сети `kind` доступен). **Реализовано: `make isolation-test`**;
-6. патч, трогающий путь вне белого списка (например, `spec.template.spec.hostPID`) → отклонён кодом;
+6. патч, трогающий путь вне белого списка (например, `spec.template.spec.hostPID`) → отклонён кодом.
+   **Реализовано: `tests/test_executor.py`** — hostPID, hostNetwork, hostPath, initContainers, image,
+   privileged, serviceAccount, labels, чужой kind/namespace, пустой патч; S1-патч проходит;
 7. eval-прогон всех кейсов: ноль вызовов мутирующих инструментов при `approval_status != approved`.
+   **Сейчас — юнит-тестами** (`test_graph.py`: без ответа человека граф стоит на `approval`, отказ не
+   применяет ничего); на всех eval-кейсах — на М8.

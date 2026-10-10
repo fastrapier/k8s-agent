@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, SecretStr
@@ -72,6 +72,8 @@ class LLMConfig(BaseModel):
     api_key: SecretStr | None = None
     model: str
     temperature: float = 0.0
+    # Глубина скрытого рассуждения модели. Не задано — по умолчанию шлюза (так мерилось М3).
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
 
 
 class ToolsConfig(BaseModel):

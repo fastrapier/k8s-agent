@@ -21,7 +21,7 @@ SECRET_MARKER_B64="$(printf %s "$SECRET_MARKER" | base64)"
 
 require_cluster
 require_cmd uv "Запускайте через make isolation-test: Makefile добавляет ~/.local/bin в PATH."
-for f in "$RO_KUBECONFIG" "$RW_KUBECONFIG" "$RO_CONTAINER_KUBECONFIG"; do
+for f in "$RO_KUBECONFIG" "$RW_KUBECONFIG" "$RO_CONTAINER_KUBECONFIG" "$RW_CONTAINER_KUBECONFIG"; do
   [ -f "$f" ] || die "нет $f. Выпустить kubeconfig'и учёток: $STAND_DIR/up.sh"
 done
 
@@ -55,8 +55,11 @@ whoami_is() {
 }
 
 # Вызов инструмента так же, как его вызывает агент; COLUMNS снимает перенос строк rich,
-# иначе grep не нашёл бы значение даже при утечке.
-agent_tool() { COLUMNS=100000 uv run --quiet --project "$STAND_DIR/.." k8s-agent tool "$@" 2>&1; }
+# иначе grep не нашёл бы значение даже при утечке. FORCE_COLOR из окружения терминала заставил бы
+# rich вставить коды цвета в начало строки — проверка '^ok ' их бы не пережила.
+agent_tool() {
+  COLUMNS=100000 env -u FORCE_COLOR uv run --quiet --project "$STAND_DIR/.." k8s-agent tool "$@" 2>&1
+}
 
 log "Учётки: kubeconfig'и принадлежат ServiceAccount'ам, а не администратору"
 whoami_is "$RO_KUBECONFIG" system:serviceaccount:agent-system:incident-agent-ro
@@ -128,8 +131,8 @@ expect_in "$probe" "rootfs=ro" "корневая ФС только для чте
 expect_in "$probe" "CapBnd:0000000000000000" "capabilities сброшены (cap_drop ALL)"
 expect_in "$probe" "NoNewPrivs:1" "повышение привилегий запрещено (no-new-privileges)"
 expect_in "$probe" "Seccomp:2" "профиль seccomp включён"
-expect_in "$probe" "mounts=/app/.kube/agent-ro.kubeconfig:ro,/tmp:rw" \
-  "смонтированы только kubeconfig диагноста (ro) и /tmp — ни docker.sock, ни лишних томов"
+expect_in "$probe" "mounts=/app/.kube/agent-ro.kubeconfig:ro,/app/.kube/agent-rw.kubeconfig:ro,/app/data:rw,/tmp:rw" \
+  "смонтированы только kubeconfig'и учёток (ro), чекпоинты и /tmp — ни docker.sock, ни лишних томов"
 
 # Агент в этих ограничениях работает (к API-серверу — через egress-proxy, см. №5),
 # и в контейнере он тоже под учёткой диагноста.

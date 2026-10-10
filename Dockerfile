@@ -22,6 +22,9 @@ FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0
 # Пользователь без пароля, без домашнего каталога и без shell для входа.
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin agent
 WORKDIR /app
+# Чекпоинты графа (SQLite) — единственное, что агент пишет. Каталог принадлежит агенту, именованный
+# том в compose наследует эти права; корневая ФС остаётся только для чтения.
+RUN mkdir /app/data && chown 10001:10001 /app/data
 COPY --from=builder /app/.venv /app/.venv
 COPY config.yaml ./
 ENV PATH=/app/.venv/bin:$PATH

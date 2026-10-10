@@ -22,8 +22,9 @@ from k8s_incident_agent.tools import READONLY_TOOLS
 PACKAGE = "k8s_incident_agent"
 PACKAGE_ROOT = Path(k8s_incident_agent.__file__).parent
 
-# Модули контура записи. Файлов пока нет — они появятся на М4, список задан заранее.
-WRITE_MODULES = {f"{PACKAGE}.tools.patch", f"{PACKAGE}.tools.executor"}
+# Модули контура записи. Исполнитель живёт вне tools/ (каталог tools/ — только read-only,
+# см. тест ниже); прежние имена оставлены, чтобы файл с таким именем тоже был пойман.
+WRITE_MODULES = {f"{PACKAGE}.executor", f"{PACKAGE}.tools.patch", f"{PACKAGE}.tools.executor"}
 
 # Имена контура записи, которых не должно быть в модулях каталога tools/.
 WRITE_NAMES = {"build_readwrite_clients", "ReadWriteClients", "k8s_patch", "k8s_rollout_restart"}
