@@ -4,6 +4,7 @@
 #   №1  учётка диагноста не может писать в кластер (RBAC);
 #   №3  значение Secret не попадает в вывод инструментов: рубеж 1 — RBAC, рубеж 2 — маскирование;
 #   №4  контейнер агента: не root, read-only rootfs, без capabilities, seccomp, только нужные тома.
+#   №5  сеть агента: наружу только LLM-шлюз и API-сервер, и только через egress-proxy.
 #
 # Права проверяются через сами kubeconfig'и учёток, а не через `kubectl --as=...` от админа:
 # `--as` проверяет правила RBAC, но не то, под чем агент реально ходит в кластер.
@@ -105,7 +106,7 @@ else pass "значение Secret ни открытым текстом, ни в
 log "№4 Контейнер агента (docker-compose.yml)"
 require_cmd docker "Нужен Docker: в нём живёт и kind, и контейнер агента."
 compose() { docker compose -f "$STAND_DIR/../docker-compose.yml" "$@"; }
-compose build --quiet agent
+compose build --quiet   # все сервисы: иначе проверялся бы прокси со старым allow-list
 
 # Одна сессия контейнера, несколько замеров; скрипт идёт через stdin, без слоёв кавычек.
 # Запись — в /var/tmp, а не в /app: /app принадлежит root, и не-root процесс получил бы отказ
@@ -118,25 +119,102 @@ grep -E "^(CapBnd|NoNewPrivs|Seccomp):" /proc/self/status | tr -d ' \t'
 echo "mounts=$(awk '$5 !~ "^/(proc|sys|dev)(/|$)" && $5 !~ "^/etc/(hosts|hostname|resolv[.]conf)$" && $5 != "/" { split($6, o, ","); print $5 ":" o[1] }' /proc/self/mountinfo | sort | paste -sd, -)"
 SH
 )"
-expect_probe() { # expect_probe <строка> <что она значит>
-  if grep -qx "$1" <<<"$probe"; then pass "$2: $1"
-  else fail "$2: ожидалось $1, получено: $(grep -E "^${1%%[=:]*}[=:]" <<<"$probe" || tail -1 <<<"$probe")"; fi
+expect_in() { # expect_in <вывод замеров> <ожидаемая строка> <что она значит>
+  if grep -qx "$2" <<<"$1"; then pass "$3: $2"
+  else fail "$3: ожидалось $2, получено: $(grep -E "^${2%%[=:]*}[=:]" <<<"$1" || tail -1 <<<"$1")"; fi
 }
-expect_probe "uid=10001" "не root"
-expect_probe "rootfs=ro" "корневая ФС только для чтения"
-expect_probe "CapBnd:0000000000000000" "capabilities сброшены (cap_drop ALL)"
-expect_probe "NoNewPrivs:1" "повышение привилегий запрещено (no-new-privileges)"
-expect_probe "Seccomp:2" "профиль seccomp включён"
-expect_probe "mounts=/app/.kube/agent-ro.kubeconfig:ro,/tmp:rw" \
+expect_in "$probe" "uid=10001" "не root"
+expect_in "$probe" "rootfs=ro" "корневая ФС только для чтения"
+expect_in "$probe" "CapBnd:0000000000000000" "capabilities сброшены (cap_drop ALL)"
+expect_in "$probe" "NoNewPrivs:1" "повышение привилегий запрещено (no-new-privileges)"
+expect_in "$probe" "Seccomp:2" "профиль seccomp включён"
+expect_in "$probe" "mounts=/app/.kube/agent-ro.kubeconfig:ro,/tmp:rw" \
   "смонтированы только kubeconfig диагноста (ro) и /tmp — ни docker.sock, ни лишних томов"
 
-# Агент в этих ограничениях работает, и в контейнере он тоже под учёткой диагноста.
+# Агент в этих ограничениях работает (к API-серверу — через egress-proxy, см. №5),
+# и в контейнере он тоже под учёткой диагноста.
 c_out="$(compose run --rm -e COLUMNS=100000 agent tool k8s_list_pods --ns "$NAMESPACE" 2>&1)" && rc=0 || rc=$?
 if [ "$rc" -eq 0 ] && grep -q '^ok ' <<<"$c_out"; then pass "k8s_list_pods из контейнера → ok"
 else fail "k8s_list_pods из контейнера → код $rc: $(tail -1 <<<"$c_out")"; fi
 c_out="$(compose run --rm -e COLUMNS=100000 agent tool k8s_get_manifest --kind Secret --name payments-db --ns "$NAMESPACE" 2>&1)" && rc=0 || rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'нет прав' <<<"$c_out"; then pass "Secret из контейнера → отказ RBAC (учётка диагноста)"
 else fail "Secret из контейнера → код $rc, отказа RBAC нет: $(tail -1 <<<"$c_out")"; fi
+
+log "№5 Сеть агента: наружу только через egress-proxy и только к двум адресам"
+# LLM-шлюз — запись allow-list прокси, кроме API-сервера (формат «имя:порт»).
+llm_host="$(grep -v control-plane "$STAND_DIR/egress-proxy/allowlist" | head -1 | cut -d: -f1)"
+net="$(compose run --rm -T -e LLM_HOST="$llm_host" --entrypoint python agent - 2>&1 <<'PY' || true
+import errno, os, socket, urllib.request, urllib.error
+
+def via_proxy(url):
+    """reachable — ответил адресат; proxy-denied — отказал сам прокси; иначе — ошибка."""
+    try:
+        urllib.request.urlopen(url, timeout=8)
+        return "reachable"
+    except urllib.error.HTTPError as exc:
+        # обычный HTTP: 403 самого tinyproxy отличаем по заголовку Server
+        if exc.code == 403 and (exc.headers.get("Server") or "").startswith("tinyproxy"):
+            return "proxy-denied"
+        return "reachable"
+    except urllib.error.URLError as exc:
+        # CONNECT: отказ прокси приходит как «Tunnel connection failed: 403 …»
+        if "Tunnel connection failed: 403" in str(exc.reason):
+            return "proxy-denied"
+        return "error"
+
+def direct_ip(ip, port):
+    """no-route только при ENETUNREACH/EHOSTUNREACH: таймаут файрвола среды ничего не доказывает."""
+    try:
+        socket.create_connection((ip, port), timeout=4).close()
+        return "reachable"
+    except OSError as exc:
+        return "no-route" if exc.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH) else "error"
+
+def dns(name):
+    try:
+        socket.gethostbyname(name)
+        return "resolved"
+    except socket.gaierror:
+        return "none"
+
+node = "k8s-incident-agent-control-plane"
+print("llm_via_proxy=" + via_proxy(f"https://{os.environ['LLM_HOST']}/v1/models"))
+print("foreign_via_proxy=" + via_proxy("https://example.com/"))
+print("llm_other_port_via_proxy=" + via_proxy(f"https://{os.environ['LLM_HOST']}:6443/"))
+print("kubelet_via_proxy=" + via_proxy(f"https://{node}:10250/"))
+print("node_plain_http_via_proxy=" + via_proxy(f"http://{node}:10256/healthz"))
+print("foreign_direct_ip=" + direct_ip("1.1.1.1", 443))
+print("foreign_dns=" + dns("example.com"))
+PY
+)"
+expect_in "$net" "llm_via_proxy=reachable" "LLM-шлюз $llm_host:443 через прокси доступен"
+expect_in "$net" "foreign_via_proxy=proxy-denied" "посторонний адрес через прокси → 403 прокси"
+expect_in "$net" "llm_other_port_via_proxy=proxy-denied" "имя шлюза на чужом порту (6443) → 403: разрешены пары имя:порт"
+expect_in "$net" "kubelet_via_proxy=proxy-denied" "kubelet (10250) на ноде с API-сервером → 403"
+expect_in "$net" "node_plain_http_via_proxy=proxy-denied" "обычный HTTP на ноду (kube-proxy :10256) → 403"
+expect_in "$net" "foreign_direct_ip=no-route" "напрямую по IP мимо прокси → маршрута нет"
+expect_in "$net" "foreign_dns=none" "внешние имена напрямую не резолвятся"
+
+# Хост Docker через адрес моста. internal-сеть убирает маршрут наружу, но не адрес моста —
+# поэтому проверка с контролем: временный слушатель на хосте должен быть виден из обычной сети
+# kind (иначе проверка ничего не доказывает) и не виден из сети агента.
+listener="$(docker run -d --rm --network host --entrypoint python k8s-incident-agent:dev -m http.server 18765)"
+trap 'rm -f "$ADMIN_KUBECONFIG"; docker rm -f "$listener" >/dev/null 2>&1 || true' EXIT
+sleep 2
+host_probe='import sys, urllib.request as u
+try:
+    u.build_opener(u.ProxyHandler({})).open(sys.argv[1], timeout=4); print("reachable")
+except Exception:
+    print("unreachable")'
+kind_gw="$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}} {{end}}' | tr ' ' '\n' | grep -m1 '\.')"
+agent_subnet="$(docker network inspect k8s-incident-agent_agent-egress -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}')"
+agent_gw="$(python3 -c "import ipaddress, sys; print(ipaddress.ip_network(sys.argv[1])[1])" "$agent_subnet")"
+control="$(docker run --rm --network kind --entrypoint python k8s-incident-agent:dev -c "$host_probe" "http://$kind_gw:18765/" 2>&1)"
+from_agent="$(compose run --rm -T --entrypoint python agent -c "$host_probe" "http://$agent_gw:18765/" 2>&1 | tail -1)"
+if [ "$control" != reachable ]; then fail "контроль: слушатель на хосте недоступен даже из сети kind — проверка недействительна"
+elif [ "$from_agent" = unreachable ]; then pass "хост Docker через адрес моста ($agent_gw) из сети агента недоступен (из сети kind — доступен)"
+else fail "хост Docker через адрес моста ($agent_gw) из сети агента доступен: $from_agent"; fi
+docker rm -f "$listener" >/dev/null 2>&1 || true
 
 echo
 if [ "$failures" -eq 0 ]; then
