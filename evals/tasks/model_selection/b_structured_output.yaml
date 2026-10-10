@@ -1,0 +1,222 @@
+# Блок B — structured output (LLM_SELECTION §4). Модель получает схему через response_format.
+# Засчитывается ответ, валидный по pydantic-схеме с первого раза; повторы считаются отдельно.
+#
+# Состав (15): Hypothesis b01, b03–b05; ReviewVerdict b02, b06, b07; Patch b08–b11;
+# IncidentRecord b12–b15. Места, где открытые модели чаще ломаются: enum по русской формулировке
+# (уверенность, вердикт, исход), пустой список gaps при verdict=ok, вложенный patch с null внутри,
+# kind Patch вне Deployment (StatefulSet, ConfigMap), булево fix_applied при отклонённом патче.
+system: |
+  Ты — узел системы диагностики инцидентов Kubernetes. Отвечай только JSON-объектом строго по
+  заданной схеме: без пояснений вокруг, без лишних полей. Ссылайся только на те id свидетельств,
+  которые есть во входных данных.
+tasks:
+  - id: b01
+    schema: Hypothesis
+    messages:
+      - role: user
+        content: |
+          Свидетельства:
+          ev-001 k8s_list_pods: api-86d9b8c4bd-v64dx CrashLoopBackOff, restarts 7
+          ev-002 k8s_logs(previous): "FATAL: environment variable DB_PASSWORD is not set"
+          ev-003 k8s_get_manifest Deployment/api: env DB_HOST, DB_NAME, DB_USER; DB_PASSWORD отсутствует
+          Сформулируй одну гипотезу о корневой причине с id h-1.
+
+  - id: b02
+    schema: ReviewVerdict
+    messages:
+      - role: user
+        content: |
+          Черновик отчёта: «Причина — нехватка памяти, под убит OOMKilled.»
+          Свидетельства: ev-001 k8s_list_pods: api CrashLoopBackOff, reason Error, exit code 1.
+          Ни одно свидетельство не показывает OOMKilled. Оцени отчёт как ревьюер.
+
+  # --- Hypothesis ----------------------------------------------------------------------------
+
+  - id: b03
+    schema: Hypothesis
+    messages:
+      - role: user
+        content: |
+          Запрос: «сервис web в namespace payments после релиза отдаёт 502».
+          Свидетельства:
+          ev-001 k8s_list_pods(selector app=web): web-5c8f6d9b7f-hn4rw и web-5c8f6d9b7f-zq7lc Running, ready 1/1
+          ev-002 k8s_get_manifest Service/web: spec.selector app=web, version=v1
+          ev-003 k8s_describe Pod/web-5c8f6d9b7f-hn4rw: labels app=web, version=v2; Ready=True
+          ev-004 k8s_describe Endpoints/web: адресов нет
+          Сформулируй одну гипотезу о корневой причине с id h-1. Уверенность высокая: каждое звено
+          цепочки Service → Endpoints → Pods подтверждено свидетельством.
+
+  - id: b04
+    schema: Hypothesis
+    messages:
+      - role: user
+        content: |
+          Запрос: «Deployment reports в namespace payments не раскатывается, 2 из 5 подов в Pending».
+          Свидетельства:
+          ev-001 k8s_list_pods(selector app=reports): 3 Running (reports-6b8f9d7c4f-*), 2 Pending (reports-547f84cc5c-8px2l, reports-547f84cc5c-q9hvt), нода не назначена
+          ev-002 k8s_events(object reports-547f84cc5c-8px2l): FailedScheduling — "0/3 nodes are available: 1 node(s) had untolerated taint {node-role.kubernetes.io/control-plane: }, 2 node(s) didn't match Pod's node affinity/selector"
+          ev-003 k8s_rollout_history reports: ревизия 2 (ReplicaSet reports-547f84cc5c), change-cause "release v2: отчёты только на нодах с NVMe"
+          Метки нод ещё не проверены, поэтому уверенность средняя. Гипотеза h-1 уже отклонена ревьюером,
+          эту сформулируй с id h-2.
+
+  - id: b05
+    schema: Hypothesis
+    messages:
+      - role: user
+        content: |
+          Запрос: «Job db-migrate в namespace payments не завершается».
+          Свидетельства:
+          ev-001 k8s_list_pods(selector job-name=db-migrate): db-migrate-h5tff phase Pending, reason PodInitializing, restarts 0
+          ev-002 k8s_describe Pod/db-migrate-h5tff: условие Initialized=False, ContainersNotInitialized, "containers with incomplete status: [wait-for-db]"
+          Логи init-контейнера ещё не собраны, что именно он ждёт — неизвестно, поэтому уверенность низкая.
+          Сформулируй предварительную гипотезу с id h-1, ссылаясь только на эти два свидетельства.
+
+  # --- ReviewVerdict -------------------------------------------------------------------------
+
+  - id: b06
+    schema: ReviewVerdict
+    messages:
+      - role: user
+        content: |
+          Черновик отчёта: «Причина 502 — selector Service web (app=web, version=v1) не совпадает с
+          метками подов после релиза v2 (version=v2), поэтому у сервиса нет endpoints. Исправление —
+          привести selector сервиса к version=v2.»
+          Свидетельства:
+          ev-001 k8s_list_pods(selector app=web): 2 пода Running, ready 1/1
+          ev-002 k8s_get_manifest Service/web: selector app=web, version=v1
+          ev-003 k8s_describe Pod/web-5c8f6d9b7f-hn4rw: labels app=web, version=v2
+          ev-004 k8s_describe Endpoints/web: адресов нет
+          Каждое утверждение отчёта подкреплено свидетельством, симптом объяснён полностью, пробелов нет.
+          Оцени отчёт как ревьюер.
+
+  - id: b07
+    schema: ReviewVerdict
+    messages:
+      - role: user
+        content: |
+          Запрос: «Deployment reports в namespace payments не раскатывается, 2 из 5 подов в Pending».
+          Черновик отчёта: «Причина — nodeSelector disktype=nvme в ревизии 2: ни одна нода ему не подходит.»
+          Свидетельства:
+          ev-001 k8s_list_pods(selector app=reports): 3 Running, 2 Pending
+          ev-002 k8s_events: FailedScheduling — "2 node(s) didn't match Pod's node affinity/selector"
+          ev-003 k8s_get_manifest Deployment/reports: nodeSelector disktype=nvme; strategy maxSurge=2, maxUnavailable=0
+          Факты собраны, но отчёт не объясняет, почему 3 пода остались Running, а в Pending ровно 2,
+          и не предлагает исправления. Оцени отчёт как ревьюер: объяснение неполное, перечисли пробелы.
+
+  # --- Patch ---------------------------------------------------------------------------------
+
+  - id: b08
+    schema: Patch
+    messages:
+      - role: user
+        content: |
+          Подтверждённая гипотеза: контейнеру api в Deployment api (namespace payments) не передана
+          переменная окружения DB_PASSWORD.
+          Свидетельства:
+          ev-002 k8s_logs(previous) api-86d9b8c4bd-v64dx: "FATAL: environment variable DB_PASSWORD is not set"
+          ev-003 k8s_get_manifest Deployment/api: env контейнера api — DB_HOST, DB_NAME, DB_USER (secretKeyRef payments-db, ключ username); DB_PASSWORD нет
+          ev-004 k8s_get_manifest Deployment/checkout: DB_PASSWORD берётся через secretKeyRef из Secret payments-db, ключ password
+          Предложи strategic merge patch для Deployment api: добавить контейнеру api переменную
+          DB_PASSWORD со ссылкой secretKeyRef на Secret payments-db, ключ password.
+
+  - id: b09
+    schema: Patch
+    messages:
+      - role: user
+        content: |
+          Подтверждённая гипотеза: в ревизии 2 Deployment reports (namespace payments) в шаблон подов
+          добавлен nodeSelector disktype=nvme, а такой метки нет ни у одной ноды.
+          Свидетельства:
+          ev-002 k8s_events(object reports-547f84cc5c-8px2l): FailedScheduling — "2 node(s) didn't match Pod's node affinity/selector"
+          ev-003 k8s_get_manifest Deployment/reports: spec.template.spec.nodeSelector disktype=nvme
+          ev-005 k8s_describe Node/k8s-incident-agent-worker и Node/k8s-incident-agent-worker2: метки disktype нет
+          Предложи патч, который убирает nodeSelector из шаблона подов целиком. В strategic merge patch
+          поле удаляется значением null.
+
+  - id: b10
+    schema: Patch
+    messages:
+      - role: user
+        content: |
+          Подтверждённая гипотеза: Deployment notifier (namespace payments) читает адрес базы из
+          ConfigMap notifier-config, ключ DB_HOST, и в значении опечатка.
+          Свидетельства:
+          ev-001 k8s_logs notifier-6f9c7d8b5d-r8xqm: "dial tcp: lookup postgres.payment.svc.cluster.local: no such host"
+          ev-002 k8s_get_manifest ConfigMap/notifier-config: data.DB_HOST = postgres.payment.svc.cluster.local
+          ev-003 k8s_get_manifest Deployment/checkout: DB_HOST = postgres.payments.svc.cluster.local, сервис работает
+          Предложи патч к ConfigMap notifier-config: исправить DB_HOST на postgres.payments.svc.cluster.local.
+
+  - id: b11
+    schema: Patch
+    messages:
+      - role: user
+        content: |
+          Подтверждённая гипотеза: под postgres-0 StatefulSet postgres (namespace payments) убивается
+          по лимиту памяти.
+          Свидетельства:
+          ev-001 k8s_list_pods: postgres-0 CrashLoopBackOff, restarts 5
+          ev-002 k8s_describe Pod/postgres-0: last state terminated, reason OOMKilled, exit code 137
+          ev-003 k8s_top: postgres-0 потребляет 251Mi памяти
+          ev-004 k8s_get_manifest StatefulSet/postgres: контейнер postgres, requests.memory 128Mi, limits.memory 256Mi
+          Предложи патч к StatefulSet postgres: контейнеру postgres поднять limits.memory до 512Mi,
+          а requests.memory до 256Mi.
+
+  # --- IncidentRecord ------------------------------------------------------------------------
+
+  - id: b12
+    schema: IncidentRecord
+    messages:
+      - role: user
+        content: |
+          Итог расследования для записи в память.
+          Namespace — payments. Затронуты Deployment api и его под api-86d9b8c4bd-v64dx.
+          Симптом — под api в CrashLoopBackOff, 7 рестартов, Exit Code 1.
+          Причина — при релизе потеряли переменную окружения DB_PASSWORD (secretKeyRef на payments-db, ключ password).
+          Исправление — патч Deployment api с env DB_PASSWORD из Secret payments-db; человек подтвердил, патч применён.
+          После применения под 1/1 Ready, рестартов нет: инцидент решён полностью.
+          Свидетельства — ev-001, ev-002, ev-003, ev-007.
+          Объекты записывай в виде namespace/имя.
+
+  - id: b13
+    schema: IncidentRecord
+    messages:
+      - role: user
+        content: |
+          Итог расследования для записи в память.
+          Namespace — payments. Затронуты Deployment reports и его поды reports-547f84cc5c-8px2l, reports-547f84cc5c-q9hvt.
+          Симптом — раскатка ревизии 2 не завершается, 2 из 5 подов в Pending, событие FailedScheduling.
+          Причина — nodeSelector disktype=nvme в шаблоне подов, такой метки нет ни у одной ноды.
+          Предложенное исправление — убрать nodeSelector из шаблона. Человек патч отклонил: команда сначала
+          хочет разметить ноды с NVMe. Патч не применялся, 2 пода по-прежнему в Pending, проблема не устранена.
+          Свидетельства — ev-001, ev-002, ev-003, ev-005.
+          Объекты записывай в виде namespace/имя.
+
+  - id: b14
+    schema: IncidentRecord
+    messages:
+      - role: user
+        content: |
+          Итог расследования для записи в память.
+          Namespace — payments. Затронуты Job db-migrate и его под db-migrate-h5tff.
+          Симптом — Job не завершается, COMPLETIONS 0/1, под в Init:0/1, рестартов 0.
+          Причина — init-контейнер wait-for-db бесконечно ждёт сервис payments-db:5432, которого нет в namespace.
+          Рекомендованное исправление — поправить имя сервиса в init-контейнере и задать activeDeadlineSeconds.
+          Агент Job не патчит, исправление не применялось. Инженер вручную удалил зависший Job, чтобы
+          разблокировать релиз: симптом снят, но причина в манифесте осталась — это смягчение, а не решение.
+          Свидетельства — ev-001, ev-002, ev-004.
+          Объекты записывай в виде namespace/имя.
+
+  - id: b15
+    schema: IncidentRecord
+    messages:
+      - role: user
+        content: |
+          Итог расследования для записи в память.
+          Namespace — payments. Затронуты StatefulSet postgres и его под postgres-0.
+          Симптом — postgres-0 в CrashLoopBackOff, last state OOMKilled, exit code 137.
+          Причина — limits.memory 256Mi меньше рабочего потребления базы.
+          Исправление — патч StatefulSet postgres, limits.memory 512Mi; человек подтвердил, патч применён.
+          Под поднялся, но потребление памяти продолжает расти: перезапуски прекратились, утечку ещё
+          предстоит найти. Это смягчение, инцидент не решён окончательно.
+          Свидетельства — ev-001, ev-002, ev-003, ev-004.
+          Объекты записывай в виде namespace/имя.

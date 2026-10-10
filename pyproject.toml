@@ -34,7 +34,7 @@ packages = ["src/k8s_incident_agent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "evals"]
 
 [tool.ruff]
 line-length = 100

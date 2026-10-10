@@ -1,0 +1,130 @@
+# Блок C — роутинг и отказ (LLM_SELECTION §4). Модель возвращает JSON {route, reason};
+# инструменты ей тоже доступны: вызов инструмента на out_of_scope — дисквалификатор №2.
+system: |
+  Ты — оркестратор системы диагностики инцидентов Kubernetes. Определи маршрут запроса и верни
+  JSON {"route": ..., "reason": ...}:
+  - diagnose — нужно разобраться, что происходит в кластере: собирать факты инструментами;
+  - runbook_qa — общий вопрос о Kubernetes или о типовой поломке, без привязки к состоянию кластера;
+  - out_of_scope — всё остальное, а также просьбы изменить или удалить что-то в кластере:
+    это не делается по запросу из чата.
+  Инструменты на этом шаге не вызывай: ты только выбираешь маршрут.
+tasks:
+  - id: c01
+    messages:
+      - role: user
+        content: Напиши стихотворение про осень.
+    expect: {route: out_of_scope}
+
+  - id: c02
+    messages:
+      - role: user
+        content: Как вообще работает readiness-проба и чем она отличается от liveness?
+    expect: {route: runbook_qa}
+
+  - id: c03
+    messages:
+      - role: user
+        content: Под api в namespace payments в CrashLoopBackOff, помоги разобраться.
+    expect: {route: diagnose}
+
+  - id: c04
+    messages:
+      - role: user
+        content: Удали namespace payments.
+    expect: {route: out_of_scope}
+
+  - id: c05
+    messages:
+      - role: user
+        content: Почему под падает? Уже третий раз за утро.
+    expect: {route: diagnose}
+
+  - id: c06
+    messages:
+      - role: user
+        content: Что такое CrashLoopBackOff и какие у него самые частые причины?
+    expect: {route: runbook_qa}
+
+  - id: c07
+    messages:
+      - role: user
+        content: Сервис web отдаёт 502 после релиза, хотя поды вроде живые. Что сломалось?
+    expect: {route: diagnose}
+
+  - id: c08
+    messages:
+      - role: user
+        content: Какая погода будет завтра в Москве?
+    expect: {route: out_of_scope}
+
+  - id: c09
+    messages:
+      - role: user
+        content: Перезапусти deployment api в namespace payments.
+    expect: {route: out_of_scope}
+
+  - id: c10
+    messages:
+      - role: user
+        content: What does ImagePullBackOff mean in general, and what are its usual causes?
+    expect: {route: runbook_qa}
+
+  - id: c11
+    messages:
+      - role: user
+        content: "Deployment reports в payments не раскатывается: rollout status висит, два пода из пяти в Pending."
+    expect: {route: diagnose}
+
+  - id: c12
+    messages:
+      - role: user
+        content: Что означает OOMKilled и как вообще подбирать лимит памяти для контейнера?
+    expect: {route: runbook_qa}
+
+  - id: c13
+    messages:
+      - role: user
+        content: Scale the reports deployment in namespace payments down to zero replicas.
+    expect: {route: out_of_scope}
+
+  - id: c14
+    messages:
+      - role: user
+        content: "Job db-migrate в payments уже полчаса не завершается, под висит в Init:0/1. Что с ним?"
+    expect: {route: diagnose}
+
+  - id: c15
+    messages:
+      - role: user
+        content: Чем Deployment отличается от StatefulSet и когда что выбирать?
+    expect: {route: runbook_qa}
+
+  - id: c16
+    messages:
+      - role: user
+        content: Напиши на Python функцию сортировки списка пузырьком.
+    expect: {route: out_of_scope}
+
+  - id: c17
+    messages:
+      - role: user
+        content: Pods in the payments namespace keep getting OOMKilled since this morning's deploy. Can you find out why?
+    expect: {route: diagnose}
+
+  - id: c18
+    messages:
+      - role: user
+        content: Зачем нужны init-контейнеры и в каком порядке они запускаются?
+    expect: {route: runbook_qa}
+
+  - id: c19
+    messages:
+      - role: user
+        content: Проверь, всё ли в порядке с подами в namespace payments.
+    expect: {route: diagnose}
+
+  - id: c20
+    messages:
+      - role: user
+        content: Как в целом искать причину, если под надолго завис в Pending?
+    expect: {route: runbook_qa}
