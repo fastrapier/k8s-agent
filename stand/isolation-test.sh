@@ -106,7 +106,7 @@ else pass "значение Secret ни открытым текстом, ни в
 log "№4 Контейнер агента (docker-compose.yml)"
 require_cmd docker "Нужен Docker: в нём живёт и kind, и контейнер агента."
 compose() { docker compose -f "$STAND_DIR/../docker-compose.yml" "$@"; }
-compose build --quiet agent
+compose build --quiet   # все сервисы: иначе проверялся бы прокси со старым allow-list
 
 # Одна сессия контейнера, несколько замеров; скрипт идёт через stdin, без слоёв кавычек.
 # Запись — в /var/tmp, а не в /app: /app принадлежит root, и не-root процесс получил бы отказ
@@ -141,49 +141,80 @@ if [ "$rc" -ne 0 ] && grep -q 'нет прав' <<<"$c_out"; then pass "Secret �
 else fail "Secret из контейнера → код $rc, отказа RBAC нет: $(tail -1 <<<"$c_out")"; fi
 
 log "№5 Сеть агента: наружу только через egress-proxy и только к двум адресам"
-# LLM-шлюз — первое имя в allow-list прокси, кроме API-сервера.
-llm_host="$(grep -v control-plane "$STAND_DIR/egress-proxy/allowlist" | head -1)"
-# Python сам сводит результат к одному слову: reachable — получен любой HTTP-ответ,
-# denied — прокси ответил 403, unreachable — до адреса не дойти вовсе.
-net="$(compose run --rm -T -e LLM_HOST="$llm_host" --entrypoint python agent - 2>&1 <<'PY'
-import os, socket, urllib.request, urllib.error
+# LLM-шлюз — запись allow-list прокси, кроме API-сервера (формат «имя:порт»).
+llm_host="$(grep -v control-plane "$STAND_DIR/egress-proxy/allowlist" | head -1 | cut -d: -f1)"
+net="$(compose run --rm -T -e LLM_HOST="$llm_host" --entrypoint python agent - 2>&1 <<'PY' || true
+import errno, os, socket, urllib.request, urllib.error
 
-def get(url, proxy=True):
-    handlers = [] if proxy else [urllib.request.ProxyHandler({})]
+def via_proxy(url):
+    """reachable — ответил адресат; proxy-denied — отказал сам прокси; иначе — ошибка."""
     try:
-        urllib.request.build_opener(*handlers).open(url, timeout=8)
+        urllib.request.urlopen(url, timeout=8)
         return "reachable"
-    except urllib.error.HTTPError:
+    except urllib.error.HTTPError as exc:
+        # обычный HTTP: 403 самого tinyproxy отличаем по заголовку Server
+        if exc.code == 403 and (exc.headers.get("Server") or "").startswith("tinyproxy"):
+            return "proxy-denied"
         return "reachable"
-    except Exception as exc:
-        return "denied" if "403" in str(exc) else "unreachable"
+    except urllib.error.URLError as exc:
+        # CONNECT: отказ прокси приходит как «Tunnel connection failed: 403 …»
+        if "Tunnel connection failed: 403" in str(exc.reason):
+            return "proxy-denied"
+        return "error"
 
-def tcp(ip, port):
+def direct_ip(ip, port):
+    """no-route только при ENETUNREACH/EHOSTUNREACH: таймаут файрвола среды ничего не доказывает."""
     try:
         socket.create_connection((ip, port), timeout=4).close()
         return "reachable"
-    except OSError:
-        return "unreachable"
+    except OSError as exc:
+        return "no-route" if exc.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH) else "error"
 
 def dns(name):
     try:
         socket.gethostbyname(name)
         return "resolved"
-    except OSError:
+    except socket.gaierror:
         return "none"
 
-print("llm_via_proxy=" + get(f"https://{os.environ['LLM_HOST']}/v1/models"))
-print("foreign_via_proxy=" + get("https://example.com/"))
-print("kubelet_via_proxy=" + get("https://k8s-incident-agent-control-plane:10250/"))
-print("foreign_direct_ip=" + tcp("1.1.1.1", 443))
+node = "k8s-incident-agent-control-plane"
+print("llm_via_proxy=" + via_proxy(f"https://{os.environ['LLM_HOST']}/v1/models"))
+print("foreign_via_proxy=" + via_proxy("https://example.com/"))
+print("llm_other_port_via_proxy=" + via_proxy(f"https://{os.environ['LLM_HOST']}:6443/"))
+print("kubelet_via_proxy=" + via_proxy(f"https://{node}:10250/"))
+print("node_plain_http_via_proxy=" + via_proxy(f"http://{node}:10256/healthz"))
+print("foreign_direct_ip=" + direct_ip("1.1.1.1", 443))
 print("foreign_dns=" + dns("example.com"))
 PY
 )"
-expect_in "$net" "llm_via_proxy=reachable" "LLM-шлюз $llm_host через прокси доступен"
-expect_in "$net" "foreign_via_proxy=denied" "посторонний адрес через прокси → 403"
-expect_in "$net" "kubelet_via_proxy=denied" "kubelet (10250) на той же ноде через прокси → 403"
-expect_in "$net" "foreign_direct_ip=unreachable" "напрямую по IP мимо прокси → маршрута нет"
+expect_in "$net" "llm_via_proxy=reachable" "LLM-шлюз $llm_host:443 через прокси доступен"
+expect_in "$net" "foreign_via_proxy=proxy-denied" "посторонний адрес через прокси → 403 прокси"
+expect_in "$net" "llm_other_port_via_proxy=proxy-denied" "имя шлюза на чужом порту (6443) → 403: разрешены пары имя:порт"
+expect_in "$net" "kubelet_via_proxy=proxy-denied" "kubelet (10250) на ноде с API-сервером → 403"
+expect_in "$net" "node_plain_http_via_proxy=proxy-denied" "обычный HTTP на ноду (kube-proxy :10256) → 403"
+expect_in "$net" "foreign_direct_ip=no-route" "напрямую по IP мимо прокси → маршрута нет"
 expect_in "$net" "foreign_dns=none" "внешние имена напрямую не резолвятся"
+
+# Хост Docker через адрес моста. internal-сеть убирает маршрут наружу, но не адрес моста —
+# поэтому проверка с контролем: временный слушатель на хосте должен быть виден из обычной сети
+# kind (иначе проверка ничего не доказывает) и не виден из сети агента.
+listener="$(docker run -d --rm --network host --entrypoint python k8s-incident-agent:dev -m http.server 18765)"
+trap 'rm -f "$ADMIN_KUBECONFIG"; docker rm -f "$listener" >/dev/null 2>&1 || true' EXIT
+sleep 2
+host_probe='import sys, urllib.request as u
+try:
+    u.build_opener(u.ProxyHandler({})).open(sys.argv[1], timeout=4); print("reachable")
+except Exception:
+    print("unreachable")'
+kind_gw="$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Gateway}} {{end}}' | tr ' ' '\n' | grep -m1 '\.')"
+agent_subnet="$(docker network inspect k8s-incident-agent_agent-egress -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}')"
+agent_gw="$(python3 -c "import ipaddress, sys; print(ipaddress.ip_network(sys.argv[1])[1])" "$agent_subnet")"
+control="$(docker run --rm --network kind --entrypoint python k8s-incident-agent:dev -c "$host_probe" "http://$kind_gw:18765/" 2>&1)"
+from_agent="$(compose run --rm -T --entrypoint python agent -c "$host_probe" "http://$agent_gw:18765/" 2>&1 | tail -1)"
+if [ "$control" != reachable ]; then fail "контроль: слушатель на хосте недоступен даже из сети kind — проверка недействительна"
+elif [ "$from_agent" = unreachable ]; then pass "хост Docker через адрес моста ($agent_gw) из сети агента недоступен (из сети kind — доступен)"
+else fail "хост Docker через адрес моста ($agent_gw) из сети агента доступен: $from_agent"; fi
+docker rm -f "$listener" >/dev/null 2>&1 || true
 
 echo
 if [ "$failures" -eq 0 ]; then

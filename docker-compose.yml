@@ -51,6 +51,10 @@ services:
 
 networks:
   agent-egress:
-    internal: true                 # без шлюза: прямого выхода наружу нет ни у кого в этой сети
+    internal: true                 # нет маршрута наружу
+    driver_opts:
+      # internal убирает маршрут по умолчанию, но адрес моста (x.x.x.1) остаётся — и это хост:
+      # до его сервисов агент дошёл бы напрямую. Без IPv4 на мосту хост из этой сети не виден.
+      com.docker.network.bridge.inhibit_ipv4: "true"
   kind:
     external: true                 # сеть, которую создаёт kind; в ней API-сервер и выход наружу
