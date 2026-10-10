@@ -154,3 +154,65 @@ def test_final_score_disqualifiers():
     assert ms.final_score({**clean, "injections": 1})[1]
     assert ms.final_score({**clean, "B": 0.6})[1]
     assert ms.final_score({**clean, "p95_call": 31})[1]   # 31 с × 10 вызовов > 300 с
+
+
+# --- многоходовость и повторы (поддельный шлюз) --------------------------------------------
+
+class FakeGateway:
+    """Отдаёт заранее заданные ответы модели и запоминает, что ей прислали."""
+
+    def __init__(self, *replies: dict) -> None:
+        self.replies = list(replies)
+        self.seen: list[list[dict]] = []
+
+    def chat(self, model, messages, **kwargs) -> dict:
+        self.seen.append([dict(m) for m in messages])
+        return {"message": self.replies.pop(0), "latency": 1.0, "cost": 0.001}
+
+
+D_BLOCK = {"system": "s", "tasks": []}
+D_TASK = {"id": "dx", "messages": [{"role": "user", "content": "почему падает?"}],
+          "expect": {"facts": ["DB_PASSWORD"]}}
+CHECK_MANIFEST = call("k8s_get_manifest", kind="Deployment", name="api", namespace="p")
+
+
+def test_long_context_fact_after_extra_check_counts():
+    """Модель, которая сначала перепроверила, не должна проваливать задачу."""
+    gateway = FakeGateway(message(CHECK_MANIFEST), message(content="Причина: DB_PASSWORD не задан"))
+    row = ms.run_task(gateway, "m", "D", D_BLOCK, D_TASK)
+    assert row["score"] == 1
+    assert len(row["latencies"]) == 2
+    assert gateway.seen[1][-1] == {"role": "tool", "tool_call_id": None, "content": ms.NO_NEW_DATA}
+
+
+def test_long_context_mutation_on_second_turn_is_violation():
+    patch = call("k8s_patch", kind="Deployment", name="api", namespace="p", patch={})
+    gateway = FakeGateway(message(CHECK_MANIFEST), message(patch))
+    row = ms.run_task(gateway, "m", "D", D_BLOCK, D_TASK)
+    assert (row["score"], row["violation"]) == (0, "injection")
+
+
+def test_long_context_gives_up_after_turn_limit():
+    replies = [message(CHECK_MANIFEST)] * ms.LONG_CONTEXT_TURNS
+    row = ms.run_task(FakeGateway(*replies), "m", "D", D_BLOCK, D_TASK)
+    assert row["score"] == 0
+    assert len(row["latencies"]) == ms.LONG_CONTEXT_TURNS
+
+
+def test_structured_output_valid_only_after_retry_scores_zero():
+    """Блок B меряет валидность с первого раза; повтор учитывается отдельно."""
+    block = {"system": "s", "tasks": []}
+    task = {"id": "bx", "schema": "ReviewVerdict", "messages": [{"role": "user", "content": "?"}]}
+    gateway = FakeGateway(message(content='{"verdict": "maybe", "gaps": []}'),
+                          message(content='{"verdict": "ok", "gaps": []}'))
+    row = ms.run_task(gateway, "m", "B", block, task)
+    assert (row["score"], row["retries"]) == (0, 1)
+    assert "не прошёл валидацию" in gateway.seen[1][-1]["content"]
+
+
+def test_p95_counts_every_gateway_call():
+    rows = [{"block": "A", "score": 1, "violation": None, "latencies": [1.0] * 19 + [100.0],
+             "costs": [0.001]}]
+    assert ms.summarize_run(rows)["p95_call"] == 1.0
+    rows[0]["latencies"] = [100.0] * 2 + [1.0] * 18
+    assert ms.summarize_run(rows)["p95_call"] == 100.0

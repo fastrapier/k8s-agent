@@ -40,6 +40,7 @@ TIMEOUT = 120               # LLM_SELECTION §5: таймаут — провал
 GATEWAY_RETRIES = 3         # 5xx и 429 повторяются и в статистику не входят
 FORMAT_RETRIES = 2          # ARCHITECTURE §8: повтор с текстом ошибки валидации, максимум 2
 CALLS_PER_INCIDENT = 10     # LLM_SELECTION R5: ~10 вызовов модели на инцидент (до блока E)
+LONG_CONTEXT_TURNS = 3     # блок D: сколько ходов модель может перепроверять до ответа
 MUTATING = {"k8s_patch", "k8s_rollout_restart"}
 
 
@@ -264,51 +265,72 @@ ROUTE_FORMAT = {"type": "json_schema", "json_schema": {"name": "Route", "schema"
     "required": ["route", "reason"], "additionalProperties": False}}}
 
 
+NO_NEW_DATA = "нет новых данных: этот инструмент вернул то же, что уже есть в истории"
+
+
 def run_task(gateway: Gateway, model: str, letter: str, block: dict, task: dict) -> dict:
+    """Одна задача. Каждый вызов шлюза пишется отдельно: латентность и цена считаются по вызовам."""
     messages = build_messages(block, task)
-    row: dict[str, Any] = {"task": task["id"], "block": letter, "violation": None, "retries": None}
+    row: dict[str, Any] = {"task": task["id"], "block": letter, "violation": None,
+                           "retries": None, "latencies": [], "costs": []}
+
+    def chat(**kwargs) -> dict:
+        reply = gateway.chat(model, messages, **kwargs)
+        row["latencies"].append(reply["latency"])
+        row["costs"].append(reply["cost"])
+        if "message" in reply:
+            row["response"] = {k: reply["message"].get(k) for k in ("content", "tool_calls")}
+        else:
+            row.update(score=0.0, detail=reply.get("error") or "таймаут")
+        return reply
 
     if letter == "B":
         schema = SCHEMAS[task["schema"]]
         response_format = {"type": "json_schema", "json_schema": {
             "name": task["schema"], "schema": schema.model_json_schema()}}
-        latency = cost = 0.0
         for attempt in range(FORMAT_RETRIES + 1):
-            reply = gateway.chat(model, messages, response_format=response_format)
-            latency += reply["latency"]
-            cost += reply["cost"]
+            reply = chat(response_format=response_format)
             if "message" not in reply:
-                row.update(score=0.0, detail=reply.get("error") or "таймаут")
-                break
+                return row
             try:
                 schema.model_validate(parse_json(reply["message"]))
                 row.update(score=1.0 if attempt == 0 else 0.0, retries=attempt,
                            detail="валидно" + (f" после {attempt} повт." if attempt else ""))
-                break
+                return row
             except (json.JSONDecodeError, ValidationError) as exc:
                 error = str(exc).splitlines()[0][:300]
                 row.update(score=0.0, detail=f"невалидно: {error}")
                 messages += [reply["message"], {"role": "user", "content":
                              f"Ответ не прошёл валидацию: {error}. Верни исправленный JSON."}]
-        row.update(latency=latency, cost=cost)
         return row
 
-    tools = AGENT_TOOLS + (EXECUTOR_TOOLS if letter == "D" else [])
-    reply = gateway.chat(model, messages, tools=tools,
-                         response_format=ROUTE_FORMAT if letter == "C" else None)
-    row.update(latency=reply["latency"], cost=reply["cost"])
+    if letter == "D":
+        # Как в цикле агента: модель может сначала сходить за подтверждением. Обычные инструменты
+        # отвечают «новых данных нет»; факт засчитывается в любом ходе, мутация в любом ходе —
+        # нарушение. Иначе добросовестную модель, которая перепроверяет, засчитали бы как провал.
+        for _ in range(LONG_CONTEXT_TURNS):
+            reply = chat(tools=AGENT_TOOLS + EXECUTOR_TOOLS)
+            if "message" not in reply:
+                return row
+            score, detail, violation = check_long_context(task["expect"], reply["message"])
+            row.update(score=score, detail=detail, violation=violation)
+            calls = reply["message"].get("tool_calls") or []
+            if score or violation or not calls:
+                return row
+            messages.append(reply["message"])
+            messages += [{"role": "tool", "tool_call_id": c.get("id"), "content": NO_NEW_DATA}
+                         for c in calls]
+        row["detail"] += f" (за {LONG_CONTEXT_TURNS} хода)"
+        return row
+
+    reply = chat(tools=AGENT_TOOLS, response_format=ROUTE_FORMAT if letter == "C" else None)
     if "message" not in reply:
-        row.update(score=0.0, detail=reply.get("error") or "таймаут")
         return row
     if letter == "A":
         row["score"], row["detail"] = check_tool_choice(task["expect"], reply["message"])
-    elif letter == "C":
+    else:
         row["score"], row["detail"], row["violation"] = check_route(
             task["expect"], reply["message"])
-    else:
-        row["score"], row["detail"], row["violation"] = check_long_context(
-            task["expect"], reply["message"])
-    row["response"] = {k: reply["message"].get(k) for k in ("content", "tool_calls")}
     return row
 
 
@@ -316,8 +338,8 @@ def run_task(gateway: Gateway, model: str, letter: str, block: dict, task: dict)
 
 def summarize_run(rows: list[dict]) -> dict:
     by_block = {letter: [r["score"] for r in rows if r["block"] == letter] for letter in "ABCD"}
-    latencies = sorted(r["latency"] for r in rows if r["latency"])
-    costs = [r["cost"] for r in rows if r["cost"]]
+    latencies = sorted(x for r in rows for x in r["latencies"] if x)
+    costs = [x for r in rows for x in r["costs"] if x]
     p95 = latencies[int(0.95 * (len(latencies) - 1))] if latencies else float(TIMEOUT)
     return {
         **{letter: statistics.mean(s) if s else 0.0 for letter, s in by_block.items()},
@@ -414,7 +436,7 @@ def main() -> None:
                     log.flush()
                     run_rows.append(row)
                     print(f"{model:20} run {run} {row['task']:4} {row['score']:.0f} "
-                          f"{row['latency']:5.1f}s {row['detail'][:70]}", flush=True)
+                          f"{sum(row['latencies']):5.1f}s {row['detail'][:70]}", flush=True)
             runs.append(summarize_run(run_rows))
             rows += run_rows
         return model, runs, rows
