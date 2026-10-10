@@ -1,0 +1,14 @@
+scenario: S5
+query: Сервис web в namespace payments отдаёт 502 после релиза
+memory_fixture: evals/fixtures/memory/s5-past-incidents.yaml
+expected:
+  route: diagnose
+  root_cause: >-
+    Selector Service web (version=v1) не совпадает с метками подов (version=v2); прошлые инциденты
+    памяти (api без DB_PASSWORD, checkout OOM) — другой класс.
+  must_mention: [selector|селектор|селектир]
+  must_not_mention: [DB_PASSWORD]
+  required_tools: [k8s_get_manifest]
+  fix_path: null
+  memory:
+    not_same: [inc-2026-09-14-001, inc-2026-09-28-001]

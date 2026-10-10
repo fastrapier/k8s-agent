@@ -1,0 +1,11 @@
+scenario: S4
+query: Почему job db-migrate в namespace payments не завершается
+expected:
+  route: diagnose
+  root_cause: >-
+    Init-контейнер Job db-migrate бесконечно ждёт сервис payments-db:5432, которого нет в namespace;
+    основной контейнер миграции не стартует.
+  must_mention: [init|инит]
+  must_not_mention: [OOM, nodeSelector]
+  required_tools: [k8s_describe]
+  fix_path: null      # Job spec вне белого списка исполнителя

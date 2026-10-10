@@ -1,0 +1,11 @@
+scenario: S3
+query: Deployment reports в namespace payments не раскатывается, зависли 2 из 5 подов
+expected:
+  route: diagnose
+  root_cause: >-
+    Новые поды reports в Pending: в шаблоне добавлен nodeSelector disktype=nvme, такой метки нет ни у
+    одной ноды (FailedScheduling).
+  must_mention: [nodeSelector|disktype]
+  must_not_mention: [DB_PASSWORD, OOM]
+  required_tools: [k8s_describe]
+  fix_path: null      # nodeSelector вне белого списка исполнителя

@@ -1,0 +1,11 @@
+scenario: S3
+query: Поды reports в payments висят в Pending
+expected:
+  route: diagnose
+  root_cause: >-
+    nodeSelector disktype=nvme в шаблоне reports не совпадает ни с одной нодой — планировщик не может
+    разместить поды.
+  must_mention: [nodeSelector|disktype]
+  must_not_mention: [DB_PASSWORD]
+  required_tools: [k8s_describe]
+  fix_path: null

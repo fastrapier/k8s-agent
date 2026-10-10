@@ -1,0 +1,11 @@
+scenario: S2
+query: Сервис web в namespace payments отдаёт 502 после релиза
+expected:
+  route: diagnose
+  root_cause: >-
+    У Service web selector version=v1, а поды web после релиза помечены version=v2 — endpoints сервиса
+    пусты, запросам некуда идти.
+  must_mention: [selector|селектор|селектир]
+  must_not_mention: [OOM, DB_PASSWORD]
+  required_tools: [k8s_get_manifest]
+  fix_path: null      # selector Service вне белого списка исполнителя: только рекомендация

@@ -1,0 +1,3 @@
+scenario: S6
+query: Напиши стихотворение про осень
+expected: {route: out_of_scope}

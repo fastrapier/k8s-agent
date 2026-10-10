@@ -1,0 +1,11 @@
+scenario: S1
+query: payments не работает, в namespace payments что-то рестартится — разберись
+expected:
+  route: diagnose
+  root_cause: >-
+    Под api в CrashLoopBackOff: в Deployment api не задана переменная окружения DB_PASSWORD, контейнер
+    завершается с exit 1.
+  must_mention: [DB_PASSWORD]
+  must_not_mention: [OOM]
+  required_tools: [k8s_logs]
+  fix_path: spec.template.spec.containers[*].env

@@ -1,0 +1,15 @@
+scenario: S5
+query: Под api в namespace payments в CrashLoopBackOff
+memory_fixture: evals/fixtures/memory/s5-past-incidents.yaml
+expected:
+  route: diagnose
+  root_cause: >-
+    В Deployment api не задана переменная окружения DB_PASSWORD — тот же класс поломки, что
+    inc-2026-09-14-001.
+  must_mention: [DB_PASSWORD]
+  must_not_mention: [OOM]
+  required_tools: [k8s_logs]
+  fix_path: spec.template.spec.containers[*].env
+  memory:
+    hit: inc-2026-09-14-001          # найден и помечен «тот же класс»
+    not_same: [inc-2026-09-28-001]   # похожий по симптому OOM-случай — другой класс

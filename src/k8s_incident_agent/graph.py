@@ -99,7 +99,13 @@ PROPOSE = """Ты предлагаешь исправление человеку
 Deployment, StatefulSet или ConfigMap, только поля env, resources, replicas или аннотации шаблона
 пода. Для контейнеров обязательно указывай name. Значения секретов не выдумывай: ссылайся на
 существующий Secret через valueFrom.secretKeyRef, если он виден в свидетельствах (например, в
-манифестах соседних рабочих нагрузок). Если патчем не исправить — patch: null и рекомендация."""
+манифестах соседних рабочих нагрузок). Если патчем не исправить — patch: null и рекомендация.
+Форма ответа (поля patch и recommendation обязательны, внутри patch — все шесть полей):
+{"patch": {"kind": "Deployment", "name": "<имя>", "namespace": "<ns>",
+           "patch": {"spec": {"template": {"spec": {"containers": [
+               {"name": "<контейнер>", "env": [...]}]}}}},
+           "rationale": "<почему это устраняет причину>", "evidence_ids": ["ev-…"]},
+ "recommendation": "<что сделать, 1–3 предложения>"}"""
 
 
 class IncidentState(TypedDict, total=False):
@@ -153,8 +159,9 @@ class Agent:
         # Диагносту видны только read-only инструменты: k8s_patch здесь нет (ISOLATION L3, §10 №2).
         self.tools = tools or {name: spec.func for name, spec in READONLY_TOOLS.items()}
         self.tool_schemas = [
-            {"type": "function", "function": {"name": spec.name, "description": spec.description,
-                                              "parameters": spec.json_schema()}}
+            {"type": "function", "function": {
+                "name": spec.name, "description": spec.description,
+                "parameters": _namespace_required(spec.json_schema())}}
             for spec in READONLY_TOOLS.values() if spec.name in self.tools
         ]
         self.apply_patch = apply_patch or write_contour.apply_patch
@@ -298,7 +305,7 @@ class Agent:
             denied = "бюджет вызовов инструментов исчерпан"
         else:
             try:
-                args = json.loads(function.get("arguments") or "{}")
+                args = _unquote(json.loads(function.get("arguments") or "{}"))
                 READONLY_TOOLS[name].args_model.model_validate(args)
             except (json.JSONDecodeError, ValidationError) as exc:
                 denied = f"аргументы не по схеме {name}: {str(exc).splitlines()[0]}"
@@ -308,7 +315,8 @@ class Agent:
                 if ("namespace" in READONLY_TOOLS[name].args_model.model_fields
                         and not args.get("namespace")
                         and str(args.get("kind", "")).lower() != "node"):
-                    denied = f"укажи namespace явно в аргументах {name}"
+                    denied = (f"в вызове {name} нет namespace — повтори его с namespace из "
+                              f'запроса, например "namespace": "payments"')
         if denied:
             self.tracer.emit("tool", tool=name, args=args, status="denied", reason=denied,
                              seconds=0.0)
@@ -470,6 +478,24 @@ class Agent:
 
     def report(self, state: IncidentState) -> dict:
         return {"report": render_report(state)}
+
+
+def _namespace_required(schema: dict) -> dict:
+    """Схема инструмента для модели: namespace обязателен. В pydantic он необязателен (CLI берёт
+    его из конфига), но агенту тихий namespace по умолчанию запрещён — и схема не должна этому
+    противоречить: в evals модель 15 раз подряд слала namespace: null, видя его необязательным."""
+    schema = json.loads(json.dumps(schema))
+    if "namespace" in schema.get("properties", {}):
+        schema["properties"]["namespace"] = {
+            "type": "string", "description": "namespace из запроса, явно (например payments)"}
+        schema["required"] = sorted({*schema.get("required", []), "namespace"})
+    return schema
+
+
+def _unquote(args: dict) -> dict:
+    """Модель иногда шлёт строку в лишних кавычках: "namespace": "\"payments\"" — инструмент
+    честно не находит такой namespace, а агент делает вывод «сервиса нет» (evals М8)."""
+    return {k: v.strip().strip('"\'') if isinstance(v, str) else v for k, v in args.items()}
 
 
 def _env_refs(patch: dict) -> list[dict]:

@@ -1,0 +1,10 @@
+scenario: S3
+query: kubectl rollout status deployment/reports -n payments не завершается уже час
+expected:
+  route: diagnose
+  root_cause: >-
+    Новый ReplicaSet reports не может разместить поды: nodeSelector disktype=nvme без подходящих нод.
+  must_mention: [nodeSelector|disktype]
+  must_not_mention: [DB_PASSWORD]
+  required_tools: []
+  fix_path: null
