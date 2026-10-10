@@ -2,7 +2,8 @@
 # Проверки изоляции из docs/ISOLATION.md раздел 10, доступные на этапе М2.
 #
 #   №1  учётка диагноста не может писать в кластер (RBAC);
-#   №3  значение Secret не попадает в вывод инструментов: рубеж 1 — RBAC, рубеж 2 — маскирование.
+#   №3  значение Secret не попадает в вывод инструментов: рубеж 1 — RBAC, рубеж 2 — маскирование;
+#   №4  контейнер агента: не root, read-only rootfs, без capabilities, без docker.sock.
 #
 # Права проверяются через сами kubeconfig'и учёток, а не через `kubectl --as=...` от админа:
 # `--as` проверяет правила RBAC, но не то, под чем агент реально ходит в кластер.
@@ -100,6 +101,41 @@ else fail "рубеж 2: тот же Secret под админом → код $rc
 if grep -qF -e "$SECRET_MARKER" -e "$SECRET_MARKER_B64" <<<"$out$ro_out$admin_out"; then
   fail "значение Secret (открытым текстом или base64) есть в выводе инструментов"
 else pass "значение Secret ни открытым текстом, ни в base64 в выводе не найдено"; fi
+
+log "№4 Контейнер агента (docker-compose.yml)"
+require_cmd docker "Нужен Docker: в нём живёт и kind, и контейнер агента."
+compose() { docker compose -f "$STAND_DIR/../docker-compose.yml" "$@"; }
+compose build --quiet agent >/dev/null
+[ -f "$RO_CONTAINER_KUBECONFIG" ] || die "нет $RO_CONTAINER_KUBECONFIG. Выпустить: $STAND_DIR/up.sh"
+
+# Одна сессия контейнера, несколько замеров. Пишем в /var/tmp, а не в /app: /app принадлежит root,
+# и не-root процесс получил бы отказ даже на записываемой ФС — проверка ничего бы не доказала.
+# Capabilities смотрим в CapBnd: у не-root процесса CapEff и так нулевой, а cap_drop ALL
+# обнуляет именно ограничивающий набор.
+probe="$(compose run --rm --entrypoint sh agent -c '
+  echo "uid=$(id -u)"
+  touch /var/tmp/probe 2>&1 | grep -q "Read-only file system" && echo rootfs=ro || echo rootfs=rw
+  grep -E "^(CapEff|CapBnd|NoNewPrivs):" /proc/self/status | tr -d " \t"
+  [ -e /var/run/docker.sock ] && echo docker_sock=yes || echo docker_sock=no
+' 2>&1)"
+expect_probe() { # expect_probe <строка> <что она значит>
+  if grep -qx "$1" <<<"$probe"; then pass "$2: $1"
+  else fail "$2: ожидалось $1, получено: $(grep -E "^${1%%[=:]*}[=:]" <<<"$probe" || echo нет)"; fi
+}
+expect_probe "uid=10001" "не root"
+expect_probe "rootfs=ro" "корневая ФС только для чтения"
+expect_probe "CapBnd:0000000000000000" "capabilities сброшены (cap_drop ALL)"
+expect_probe "CapEff:0000000000000000" "действующих capabilities нет"
+expect_probe "NoNewPrivs:1" "повышение привилегий запрещено (no-new-privileges)"
+expect_probe "docker_sock=no" "docker.sock не смонтирован"
+
+# Агент в этих ограничениях работает, и в контейнере он тоже под учёткой диагноста.
+c_out="$(COLUMNS=100000 compose run --rm agent tool k8s_list_pods --ns "$NAMESPACE" 2>&1)" && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q '^ok ' <<<"$c_out"; then pass "k8s_list_pods из контейнера → ok"
+else fail "k8s_list_pods из контейнера → код $rc"; fi
+c_out="$(COLUMNS=100000 compose run --rm agent tool k8s_get_manifest --kind Secret --name payments-db --ns "$NAMESPACE" 2>&1)" && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'нет прав' <<<"$c_out"; then pass "Secret из контейнера → отказ RBAC (учётка диагноста)"
+else fail "Secret из контейнера → код $rc, отказа RBAC нет"; fi
 
 echo
 if [ "$failures" -eq 0 ]; then

@@ -1,0 +1,30 @@
+# Запуск агента в контейнере (ТЗ N2, docs/ISOLATION.md раздел 4).
+#
+#   make agent-tool TOOL=k8s_list_pods ARGS="--ns payments"
+#
+# Каждая строка ниже снимает одну возможность, которая агенту не нужна. Проверки —
+# `make isolation-test`, раздел «№4 Контейнер».
+
+services:
+  agent:
+    build: .
+    image: k8s-incident-agent:dev
+    user: "10001:10001"            # не root, даже если в образе USER потеряют
+    read_only: true                # агент не может дописать себе код или конфиг
+    cap_drop: [ALL]                # ни одна capability не нужна: нет bind <1024, ptrace, mount
+    security_opt:
+      - no-new-privileges:true     # setuid-бинарники не поднимут привилегии
+    pids_limit: 256                # зацикливание не съест хост
+    mem_limit: 2g                  # с запасом под bge-m3 на М6
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    volumes:
+      # Только kubeconfig диагноста, только чтение. Адрес API-сервера в нём — имя ноды kind
+      # в docker-сети, а не 127.0.0.1 хоста. Файл выпускает stand/up.sh.
+      - ./.kube/agent-ro.container.kubeconfig:/app/.kube/agent-ro.kubeconfig:ro
+      # /var/run/docker.sock не монтируется намеренно: с ним контейнер управлял бы хостом.
+    networks: [kind]
+
+networks:
+  kind:
+    external: true                 # сеть, которую создаёт kind; в ней живёт API-сервер

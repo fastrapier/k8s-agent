@@ -54,8 +54,10 @@ kc rollout status deployment/checkout -n "$NAMESPACE" --timeout="${WAIT_TIMEOUT}
 log "Выпускаю kubeconfig'и учёток агента в ${AGENT_KUBE_DIR}"
 write_agent_kubeconfig incident-agent-ro "$RO_KUBECONFIG"
 write_agent_kubeconfig incident-agent-rw "$RW_KUBECONFIG"
+write_agent_kubeconfig incident-agent-ro "$RO_CONTAINER_KUBECONFIG" "$CONTAINER_API_SERVER"
 dim "диагност:    $RO_KUBECONFIG (incident-agent-ro, токен на 24 ч)"
 dim "исполнитель: $RW_KUBECONFIG (incident-agent-rw, токен на 24 ч)"
+dim "контейнер:   $RO_CONTAINER_KUBECONFIG (incident-agent-ro, адрес $CONTAINER_API_SERVER)"
 
 elapsed=$(( $(date +%s) - started ))
 echo
