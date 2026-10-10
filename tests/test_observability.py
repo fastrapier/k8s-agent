@@ -60,7 +60,7 @@ class Gateway(LLMClient):
         self.model, self.reasoning_effort, self.tracer = "m", None, tracer
         self.replies = list(replies)
 
-    def _call(self, messages, tools, response_format, model):
+    def _call(self, messages, tools, response_format, model, timeout=None):
         return {"message": {"content": self.replies.pop(0)}, "latency": 2.5, "cost": 0.001,
                 "tokens_in": 100, "tokens_out": 20}
 

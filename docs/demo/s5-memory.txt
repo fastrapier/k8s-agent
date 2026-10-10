@@ -1,0 +1,135 @@
+uv run k8s-agent memory seed evals/fixtures/memory/s5-past-incidents.yaml
+загружено: inc-2026-09-14-001, inc-2026-09-28-001
+uv run k8s-agent run "Под api в namespace payments в CrashLoopBackOff, разберись"
+инцидент fedb3d7d, модель z-ai/glm-5.3
+ classify маршрут: diagnose
+     plan скилл crashloop-diagnosis; план: Зафиксировать namespace и имя пода, проверить READY/STATUS/restart count; Получить exit code, reason (OOMKilled / 
+Error) и условия пода; Прочитать лог предыдущего упавшего запуска — там причина падения; Подтвердить картину событиями: probes, image pull, убийство контейнера;
+Проверить манифест владельца (Deployment api, без хеша ReplicaSet) — env, probes, лимиты
+ diagnose свидетельства: ev-001, ev-002, ev-003, ev-004 (вызовов инструментов всего: 4)
+  analyze гипотез: 2, похожие в памяти: inc-2026-09-14-001
+   review ревью: ok (итерация 1)
+  propose патч: Deployment/api
+
+Предлагается патч Deployment/api в payments
+{                                                                                                                                                               
+  "spec": {                                                                                                                                                     
+    "template": {                                                                                                                                               
+      "spec": {                                                                                                                                                 
+        "containers": [                                                                                                                                         
+          {                                                                                                                                                     
+            "name": "api",                                                                                                                                      
+            "env": [                                                                                                                                            
+              {                                                                                                                                                 
+                "name": "DB_PASSWORD",                                                                                                                          
+                "valueFrom": {                                                                                                                                  
+                  "secretKeyRef": {                                                                                                                             
+                    "key": "password",                                                                                                                          
+                    "name": "payments-db"                                                                                                                       
+                  }                                                                                                                                             
+                }                                                                                                                                               
+              }                                                                                                                                                 
+            ]                                                                                                                                                   
+          }                                                                                                                                                     
+        ]                                                                                                                                                       
+      }                                                                                                                                                         
+    }                                                                                                                                                           
+  }                                                                                                                                                             
+}                                                                                                                                                               
+Почему: Контейнер падает с exit 1, потому что DB_PASSWORD не задана (ev-003: «FATAL: environment variable DB_PASSWORD is not set»), а в env Deployment 
+определены только DB_HOST, DB_NAME и DB_USER (ev-004), что даёт CrashLoopBackOff с 5 рестартами (ev-001). Secret payments-db уже используется в этом же 
+контейнере через secretKeyRef для ключа username (ev-004), поэтому добавление ссылки на ключ password этого же Secret устраняет причину без раскрытия значений. 
+Неопределённость: наличие ключа password в Secret payments-db не подтверждено свидетельствами — перед применением нужно проверить ключи Secret (без чтения 
+значений). (свидетельства: ev-003, ev-004, ev-001)
+Перед применением патча проверьте (без чтения значений), что Secret payments-db в namespace payments содержит ключ password. Если ключ есть — примените 
+предложенный strategic merge patch, добавляющий env DB_PASSWORD через secretKeyRef, и после накатки перепроверьте состояние пода и логи. Если ключа password нет
+— патч не применять, а сначала создать/пополнить Secret силами владельца сервиса.
+ответить позже: k8s-agent run --thread fedb3d7d
+Применить патч? [y/N]:   execute исполнение: applied
+ remember записано в память: inc-2026-10-10-003
+
+                                                                       Отчёт об инциденте                                                                       
+
+Симптомы                                                                                                                                                        
+
+Под api в namespace payments в CrashLoopBackOff, разберись                                                                                                      
+
+Свидетельства                                                                                                                                                   
+
+ • ev-001 k8s_list_pods — namespace payments: подов 1, проблемных 1 (api-86d9b8c4bd-nnqf4=CrashLoopBackOff)                                                     
+ • ev-002 k8s_describe — Pod api-86d9b8c4bd-nnqf4 в namespace payments: контейнеры в состоянии CrashLoopBackOff                                                 
+ • ev-003 k8s_logs — лог пода api-86d9b8c4bd-nnqf4 предыдущего запуска: 3 строк; последняя: [api] FATAL: environment variable DB_PASSWORD is not set; cannot    
+   connect to database payments                                                                                                                                 
+ • ev-004 k8s_get_manifest — манифест Deployment api из namespace payments                                                                                      
+
+Скилл: crashloop-diagnosis                                                                                                                                      
+
+Причина                                                                                                                                                         
+
+В манифесте Deployment api (namespace payments) отсутствует переменная окружения DB_PASSWORD: в spec.template.spec.containers[0].env определены только DB_HOST, 
+DB_NAME и DB_USER (ev-004), а скрипт контейнера при пустом DB_PASSWORD пишет FATAL и делает exit 1 (ev-004), что подтверждается логом предыдущего контейнера    
+«FATAL: environment variable DB_PASSWORD is not set» (ev-003) и 5 рестартами с CrashLoopBackOff (ev-001). Вероятная причина — регресс при деплое ревизии 1      
+(ev-004: generation 1, revision '1'), когда env-переменная из Secret payments-db не была включена в шаблон. (уверенность: high; свидетельства: ev-003, ev-004,  
+ev-001)                                                                                                                                                         
+
+ • альтернатива: Secret payments-db в namespace payments существует и содержит ключ username (ссылка DB_USER через secretKeyRef принята — иначе под падал бы с  
+   CreateContainerConfigError, а не выполнял скрипт, ev-004, ev-001), но либо в нём нет ключа password, либо ссылка на него вообще не задана в Deployment.      
+   Наблюдение: env содержит secretKeyRef только для username (ev-004); лог показывает отсутствие DB_PASSWORD (ev-003). Для различения вариантов нужно проверить 
+   ключи Secret payments-db (без чтения значений).                                                                                                              
+
+Исправление                                                                                                                                                     
+
+Перед применением патча проверьте (без чтения значений), что Secret payments-db в namespace payments содержит ключ password. Если ключ есть — примените         
+предложенный strategic merge patch, добавляющий env DB_PASSWORD через secretKeyRef, и после накатки перепроверьте состояние пода и логи. Если ключа password нет
+— патч не применять, а сначала создать/пополнить Secret силами владельца сервиса.                                                                               
+
+Патч Deployment/api в payments:                                                                                                                                 
+
+                                                                                                                                                                
+ {                                                                                                                                                              
+   "spec": {                                                                                                                                                    
+     "template": {                                                                                                                                              
+       "spec": {                                                                                                                                                
+         "containers": [                                                                                                                                        
+           {                                                                                                                                                    
+             "name": "api",                                                                                                                                     
+             "env": [                                                                                                                                           
+               {                                                                                                                                                
+                 "name": "DB_PASSWORD",                                                                                                                         
+                 "valueFrom": {                                                                                                                                 
+                   "secretKeyRef": {                                                                                                                            
+                     "key": "password",                                                                                                                         
+                     "name": "payments-db"                                                                                                                      
+                   }                                                                                                                                            
+                 }                                                                                                                                              
+               }                                                                                                                                                
+             ]                                                                                                                                                  
+           }                                                                                                                                                    
+         ]                                                                                                                                                      
+       }                                                                                                                                                        
+     }                                                                                                                                                          
+   }                                                                                                                                                            
+ }                                                                                                                                                              
+                                                                                                                                                                
+
+Подтверждение: approved. Результат: applied — раскатка завершена: {'desired': 1, 'updated': 1, 'ready': 1}                                                      
+
+Похожие инциденты                                                                                                                                               
+
+ • inc-2026-09-14-001 от 2026-09-14 — тот же класс поломки.                                                                                                     
+    • тогда: В релизе из манифеста Deployment api пропала переменная DB_PASSWORD; приложение при старте пишет «FATAL: environment variable DB_PASSWORD is not   
+      set» и завершается с exit 1.                                                                                                                              
+    • помогло: Вернули env DB_PASSWORD через valueFrom.secretKeyRef на Secret payments-db, ключ password — так же, как у checkout. Раскатка прошла, под Running.
+    • отличие: Тот же класс поломки и то же сообщение FATAL; отличие: сейчас Deployment в generation 1 / revision 1 (ev-004), т.е. это первый деплой текущего   
+      манифеста, а не обновление поверх рабочей версии. Прошлый фикс — подсказка, не свидетельство: перед применением нужно проверить, что Secret payments-db   
+      содержит ключ password и что текущий Deployment действительно не включает DB_PASSWORD (ev-004).                                                           
+ • inc-2026-09-28-001 от 2026-09-28 — другой случай: Другой класс: там OOMKilled (exit 137) из-за лимита памяти; здесь exit 1 по отсутствию env-переменной      
+   (ev-003, ev-004), рестарты не связаны с ресурсами.                                                                                                           
+
+Записано в память: inc-2026-10-10-003.                                                                                                                          
+
+Потрачено                                                                                                                                                       
+
+ • вызовов инструментов: 4                                                                                                                                      
+ • вызовов модели: 10, стоимость $0.0166                                                                                                                        
+ • время: 37 с                                                                                                                                                  

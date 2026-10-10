@@ -137,6 +137,7 @@ class IncidentState(TypedDict, total=False):
 
 
 Tool = Callable[..., Any]
+PROPOSE_TIMEOUT = 45      # с; см. propose
 EVIDENCE_EXCERPT = 3000   # символов сырого вывода на свидетельство: манифест входит целиком
 
 
@@ -356,6 +357,10 @@ class Agent:
         similar = [{**vars(past[s.incident_id]), "same_class": s.same_class,
                     "difference": s.difference}
                    for s in result.similar if s.incident_id in past]
+        # Найденное, но не оценённое моделью, не теряется: в отчёте — «класс не оценён».
+        judged = {s["id"] for s in similar}
+        similar += [{**vars(p), "same_class": None, "difference": ""}
+                    for p in past.values() if p.id not in judged]
         return {"hypotheses": valid, "similar_incidents": similar, **self._usage(state, usage)}
 
     def review(self, state: IncidentState) -> dict:
@@ -384,11 +389,20 @@ class Agent:
     def propose(self, state: IncidentState) -> dict:
         usage = Usage()
         hypotheses = json.dumps(state.get("hypotheses", []), ensure_ascii=False)
-        proposal = self.llm.structured([
-            system(PROPOSE),
-            {"role": "user", "content": f"Запрос: {state['query']}\n\nГипотезы: {hypotheses}\n\n"
-                                        f"Свидетельства:\n{self._evidence_text(state, True)}"}],
-            PatchProposal, usage, free_form=True)
+        content = (f"Запрос: {state['query']}\n\nГипотезы: {hypotheses}\n\n"
+                   f"Свидетельства:\n{self._evidence_text(state, True)}")
+        # Что помогло в прошлый раз при том же классе поломки (S5). Это подсказка, а не
+        # свидетельство: проверки патча кодом (_ground) от неё не зависят — Secret в ссылке всё
+        # равно должен быть виден в прочитанных манифестах.
+        past = [s for s in state.get("similar_incidents", []) if s.get("same_class")]
+        if past:
+            content += "\n\nТот же класс поломки в прошлом — что помогло:\n" + "\n".join(
+                f"- {s['id']}: {s['fix']}" for s in past)
+        # Свой таймаут и один повтор: в evals ответ propose изредка зависал до 120 с (1 из 42)
+        # при p95 13 с и максимуме нормального ответа 28 с. Худший случай — 90 с, и с патчем.
+        proposal = self.llm.structured([system(PROPOSE), {"role": "user", "content": content}],
+                                       PatchProposal, usage, free_form=True,
+                                       timeout=PROPOSE_TIMEOUT, timeout_retries=1)
         patch = proposal.patch.model_dump() if proposal.patch else None
         recommendation = proposal.recommendation
         if patch is not None:
@@ -557,11 +571,15 @@ def _similar_lines(state: IncidentState) -> list[str]:
     if not similar:
         return ["В памяти похожих инцидентов нет."]
     lines = []
-    for s in sorted(similar, key=lambda s: not s["same_class"]):
+    order = {True: 0, None: 1, False: 2}
+    for s in sorted(similar, key=lambda s: order[s["same_class"]]):
         head = f"- `{s['id']}` от {s['created_at'][:10]}"
         if s["same_class"]:
             lines += [f"{head} — тот же класс поломки.", f"  - тогда: {s['root_cause']}",
                       f"  - помогло: {s['fix']}", f"  - отличие: {s['difference']}"]
+        elif s["same_class"] is None:
+            lines += [f"{head} — найден в памяти, класс аналитик не оценил.",
+                      f"  - тогда: {s['root_cause']}", f"  - помогло: {s['fix']}"]
         else:
             lines.append(f"{head} — другой случай: {s['difference']}")
     return lines

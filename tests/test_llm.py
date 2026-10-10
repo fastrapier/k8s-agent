@@ -18,7 +18,8 @@ class Scripted(LLMClient):
         self.replies, self.requests = list(replies), []
         self.model, self.tracer = "test-model", NULL_TRACER
 
-    def raw(self, messages, tools=None, response_format=None, model=None, label=""):
+    def raw(self, messages, tools=None, response_format=None, model=None, label="",
+            timeout=None):
         self.requests.append({"messages": list(messages), "response_format": response_format})
         return {"message": {"content": self.replies.pop(0)}, "latency": 0.1, "cost": 0.0}
 
@@ -45,3 +46,23 @@ def test_invalid_answer_is_retried_with_error_then_fails():
         llm.structured([], Route, Usage())
     assert len(llm.requests) == 3
     assert "не прошёл валидацию" in llm.requests[1]["messages"][-1]["content"]
+
+
+class Hanging(Scripted):
+    """Первый ответ — зависание до таймаута, второй — нормальный."""
+
+    def raw(self, messages, tools=None, response_format=None, model=None, label="",
+            timeout=None):
+        self.requests.append({"timeout": timeout})
+        if len(self.requests) == 1:
+            return {"timeout": True, "latency": timeout, "cost": 0.0}
+        return {"message": {"content": self.replies.pop(0)}, "latency": 1.0, "cost": 0.0}
+
+
+def test_timeout_retry_only_when_asked():
+    """propose повторяет зависший вызов один раз; остальные узлы — нет (худший случай не растёт)."""
+    llm = Hanging(['{"route": "diagnose", "reason": "x"}'])
+    assert llm.structured([], Route, Usage(), timeout=45, timeout_retries=1).route == "diagnose"
+    assert [r["timeout"] for r in llm.requests] == [45, 45]
+    with pytest.raises(LLMError):
+        Hanging(['{"route": "diagnose", "reason": "x"}']).structured([], Route, Usage())

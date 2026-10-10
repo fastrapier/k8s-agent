@@ -7,7 +7,7 @@ export PATH := $(HOME)/.local/bin:$(PATH)
 .DEFAULT_GOAL := help
 .PHONY: help install lock test lint lint-fix config-show tool \
         stand-up stand-break stand-status stand-clean stand-down stand demo-secrets \
-        demo-s1 demo-s1-container demo-s5 demo-s6 memory-list \
+        demo demo-s1 demo-s1-container demo-s5 demo-s6 memory-list \
         isolation-test agent-build agent-tool eval-models eval alerts-check obs-up obs-down metrics check
 
 help:  ## список целей
@@ -88,6 +88,28 @@ demo-s5:  ## приёмка М6: прошлый инцидент из памят
 
 memory-list:  ## записи эпизодической памяти data/memory.sqlite
 	uv run k8s-agent memory list
+
+# --- М10: сценарий защиты ----------------------------------------------------
+# Порядок и что говорить на каждом шаге — docs/DEMO.md. Подтверждение патча — вручную («y»).
+
+demo:  ## М10: защита целиком — стенд, отказ S6, S1 с подтверждением, трейс, повтор S5 с памятью, метрики
+	@printf '\n\033[1m== 1/6 Стенд: четыре поломки внесены\033[0m\n'
+	@# Память демо — с чистого листа: на шаге 5 агент находит ровно то, что записал на шаге 3.
+	@# Прежняя память не удаляется, а откладывается рядом.
+	@test ! -f data/memory.sqlite || mv data/memory.sqlite data/memory.$$(date +%Y%m%dT%H%M%S).sqlite
+	@$(MAKE) -s stand-break SCENARIO=s1 >/dev/null
+	@$(MAKE) -s stand-status | grep -E 'S[1-4]'
+	@printf '\n\033[1m== 2/6 S6: запрос вне области — отказ без единого вызова инструментов\033[0m\n'
+	@$(MAKE) -s demo-s6
+	@printf '\n\033[1m== 3/6 S1: жалоба → скилл → свидетельства → патч → ваше подтверждение\033[0m\n'
+	@uv run k8s-agent run "$(S1_QUERY)" --show-skill
+	@printf '\n\033[1m== 4/6 Трейс этого прогона: каждый вызов модели и инструмента\033[0m\n'
+	@uv run k8s-agent trace --last
+	@printf '\n\033[1m== 5/6 S5: та же поломка снова — агент находит прошлый случай в памяти\033[0m\n'
+	@$(MAKE) -s stand-break SCENARIO=s1 >/dev/null
+	@$(MAKE) -s demo-s5
+	@printf '\n\033[1m== 6/6 Метрики Prometheus, посчитанные из трейсов\033[0m\n'
+	@uv run k8s-agent metrics show | grep -E '^agent_(runs_total|approvals_total|run_duration_seconds_(sum|count)|run_cost_usd_sum)'
 
 # --- М2: изоляция -----------------------------------------------------------
 

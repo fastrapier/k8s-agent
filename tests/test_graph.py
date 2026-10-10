@@ -61,7 +61,7 @@ class FakeLLM:
             self.tool_turns += 1
         return self.chat_replies.pop(0) if self.chat_replies else {"content": "готово"}
 
-    def structured(self, messages, schema, usage, free_form=False):
+    def structured(self, messages, schema, usage, free_form=False, **_):
         if schema.__name__ in self.fail:
             raise LLMError("таймаут шлюза")
         if schema is Route:
@@ -317,3 +317,33 @@ def test_quoted_namespace_is_unquoted(config):
                         {"content": "готово"}], patch=None)
     state, _, _ = run(llm, config)
     assert [e["args"]["namespace"] for e in state["evidence"]] == ["payments"]
+
+
+def test_past_fix_of_same_class_reaches_propose(config):
+    """S5: прошлый фикс того же класса — подсказка автору патча; другой класс не подсказывается."""
+    memory = MemoryStore()
+    same = memory.write(PAST, created_at="2026-09-14T10:00:00+00:00")
+    other = memory.write(PAST.model_copy(update={"objects": ["payments/checkout"],
+                                                 "fix": "limits.memory 256Mi"}))
+    llm = FakeLLM(similar=[{"incident_id": same, "same_class": True, "difference": "-"},
+                           {"incident_id": other, "same_class": False, "difference": "OOM"}])
+    seen = []
+    original = llm.structured
+
+    def spy(messages, schema, usage, free_form=False, **kw):
+        if schema is PatchProposal:
+            seen.append(messages[-1]["content"])
+        return original(messages, schema, usage, free_form, **kw)
+
+    llm.structured = spy
+    run(llm, config, resume="rejected", memory=memory)
+    assert "secretKeyRef" in seen[0] and "256Mi" not in seen[0]
+
+
+def test_unjudged_memory_candidate_is_still_reported(config):
+    """Репетиция демо: модель опустила оценку кандидатов — найденный случай всё равно в отчёте."""
+    memory = MemoryStore()
+    past_id = memory.write(PAST, created_at="2026-09-14T10:00:00+00:00")
+    state, _, _ = run(FakeLLM(similar=[]), config, resume="rejected", memory=memory)
+    assert [(s["id"], s["same_class"]) for s in state["similar_incidents"]] == [(past_id, None)]
+    assert past_id in state["report"] and "не оценил" in state["report"]
