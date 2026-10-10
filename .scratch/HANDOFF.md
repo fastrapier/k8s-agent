@@ -1,4 +1,47 @@
-# Передача работы: состояние на 2026-09-29
+# Передача работы
+
+## ⚡ Текущее состояние: 2026-10-10, вечер. Защита — 2026-10-13. Читать это первым.
+
+**Смержено в `main` (PR #1–#9):** М1 (маскирование), стенд S4/metrics-server, CI, М2 целиком (RBAC
+двух учёток, контейнер без root/capabilities, egress только через прокси — `make isolation-test` 40/40),
+М3 (сравнение 4 моделей → `z-ai/glm-5.3`, LLM_SELECTION §7–8). Пользователь разрешил мержить самому:
+мерж-коммитом, после зелёного CI.
+
+**Открыто:**
+- **PR #10 `m4-graph` — граф агента (М4).** CI зелёный. Живой S1 прошёл на хосте и в контейнере (диагноз →
+  патч DB_PASSWORD из secretKeyRef payments-db/password → «y» → applied → раскатка завершена), S6 — отказ.
+  Ждёт ревью: Codex делает его в `.worktrees/m4-review`, итог — `.worktrees/codex-review-result.md`.
+  Разобрать находки, исправить, мержить.
+- **Ветка `m5-skills` (поверх m4-graph):** код М5 закоммичен (`knowledge.py`: SOUL/IDENTITY в промпты,
+  скилл по триггерам в узле plan, runbook_qa по оглавлению, `--show-skill`; Dockerfile копирует skills/
+  и agent/). Тексты skills/ и agent/ пишет Codex в `.worktrees/m5-content` (ветка m5-content), итог —
+  `.worktrees/codex-skills-result.md`. Дальше: перенести файлы в m5-skills, тест «S1→crashloop-diagnosis,
+  S3→pending-pod, S4→stuck-job, S2→ingress-502», живой S1 с `--show-skill`, DEFENSE/спека, PR.
+- **Flash-модели М3** прогнаны (`evals/results/eval-models-flash.log`, отчёт в последнем каталоге
+  `evals/results/model-selection/`). Дописать в LLM_SELECTION как кандидатов на дешёвые узлы.
+
+**План до защиты (сначала ширина, упрощения — в DEFENSE):**
+- М6 память: SQLite + FTS5 по схеме MEMORY §3.1, `memory_writer` после отчёта (без секретов), поиск похожих
+  в analyze, раздел «Похожие инциденты» в отчёте, `make demo-s5` с фикстурой прошлого инцидента.
+  Эмбеддинги bge-m3 — упрощение (2 ГБ весов + torch против лимита контейнера 512m), записать в DEFENSE.
+- М7 наблюдаемость: JSONL-трейс каждого прогона (узлы, вызовы LLM/инструментов, цена), `/metrics` из
+  трейсов, правила алертов + promtool, дашборд Grafana JSON. Langfuse не поднимаем — расхождение в DEFENSE.
+- М8: системные evals S1–S6 на стенде (до approval, без применения), судья `sub/claude-opus-5`.
+- М9: ADR (LangGraph + свой клиент, FTS5 без векторов, egress-прокси, свой трейс), CONTEXT.md, сверка
+  ARCHITECTURE; М10: `make demo`, сценарий защиты.
+
+**Как работать:** спека `.scratch/<кусок>/spec.md` + PR «зачем / почему не проще / как проверено»; в
+DEFENSE — ответы на вопросы комиссии. Codex — `codex exec --sandbox workspace-write -C .worktrees/<имя>`
+в worktree без `local.env`. Перед push — grep диффа на префикс токена из `local.env`.
+
+**Ловушки окружения:** в shell `FORCE_COLOR=3` (rich красит вывод — проверки снимают его); связь с
+github.com периодически рвётся — повторять push; прежний scratchpad исчез — временное писать в
+`.worktrees/` или `evals/results/` (оба в .gitignore); после рестарта Docker S4 чинится
+`make stand-break SCENARIO=s4`; после демо S1 поломку возвращает `make stand-break SCENARIO=s1`.
+
+---
+
+# Исторические записи (состояние на 2026-09-29)
 
 > Обновление 2026-10-05: блокер раздела 4 снят. kind v0.33.0 и Docker 29.8.1 работают.
 > `make stand` прошёл: S1–S4 в целевом состоянии, `checkout` 2/2 Ready; up 75 с,

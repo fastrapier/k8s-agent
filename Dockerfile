@@ -27,6 +27,9 @@ WORKDIR /app
 RUN mkdir /app/data && chown 10001:10001 /app/data
 COPY --from=builder /app/.venv /app/.venv
 COPY config.yaml ./
+# Знания агента (ТЗ §7): SOUL, IDENTITY, скиллы, runbooks — часть образа, в рантайме только чтение.
+COPY skills ./skills
+COPY agent ./agent
 ENV PATH=/app/.venv/bin:$PATH
 USER 10001
 ENTRYPOINT ["k8s-agent"]

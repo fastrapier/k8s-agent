@@ -25,3 +25,9 @@ models/
 .DS_Store
 .idea/
 .vscode/
+
+# Временные git worktree для делегирования задач (Codex)
+.worktrees/
+
+# Чекпоинты графа и эпизодическая память: вывод кластера, в git не место.
+data/

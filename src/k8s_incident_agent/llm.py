@@ -129,7 +129,7 @@ class LLMClient:
             try:
                 return schema.model_validate(parse_json(reply["message"]))
             except (json.JSONDecodeError, ValidationError) as exc:
-                error = str(exc).splitlines()[0][:300]
+                error = " ".join(str(exc).split())[:400]   # какие поля не так — видно в отчёте
                 messages += [reply["message"], {"role": "user", "content":
                              f"Ответ не прошёл валидацию: {error}. Верни исправленный JSON."}]
         raise LLMError(f"модель не дала валидный {schema.__name__}: {error}")

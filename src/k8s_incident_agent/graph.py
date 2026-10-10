@@ -30,8 +30,16 @@ from pydantic import ValidationError
 from k8s_incident_agent import executor as write_contour
 from k8s_incident_agent.config import AppConfig, get_config
 from k8s_incident_agent.evidence import EvidenceStore
+from k8s_incident_agent.knowledge import agent_file, load_skills, runbook_sections, select_skill
 from k8s_incident_agent.llm import LLMClient, LLMError, Usage
-from k8s_incident_agent.schemas import Hypotheses, PatchProposal, Plan, ReviewVerdict, Route
+from k8s_incident_agent.schemas import (
+    Hypotheses,
+    PatchProposal,
+    Plan,
+    ReviewVerdict,
+    Route,
+    RunbookPick,
+)
 from k8s_incident_agent.text import truncate
 from k8s_incident_agent.tools import READONLY_TOOLS
 
@@ -48,8 +56,12 @@ REFUSAL = ("Я помогаю диагностировать инциденты 
            "подтверждения. С этим запросом помочь не могу. Опишите, что происходит в кластере, "
            "— например: «под api в namespace payments в CrashLoopBackOff».")
 
-RUNBOOK = """Ты — инженер SRE. Ответь на общий вопрос о Kubernetes по существу, кратко, по-русски.
-Состояние конкретного кластера ты не видишь и не утверждаешь о нём ничего."""
+RUNBOOK = """Ты — инженер SRE. Ответь на общий вопрос о Kubernetes по существу, кратко, по-русски,
+опираясь на раздел runbook ниже. Состояние конкретного кластера ты не видишь и не утверждаешь о нём
+ничего."""
+
+RUNBOOK_PICK = """Выбери по оглавлению runbooks раздел, который лучше всего отвечает на вопрос.
+Верни номер раздела из списка."""
 
 PLAN = """Ты — оркестратор системы диагностики инцидентов Kubernetes. Составь короткий план сбора
 фактов о симптоме из запроса: 2–6 шагов, каждый — какой факт установить и каким инструментом.
@@ -92,6 +104,7 @@ class IncidentState(TypedDict, total=False):
     route: str
     plan: list[dict]
     evidence: Annotated[list[dict], operator.add]
+    active_skill: str | None
     hypotheses: list[dict]
     gaps: list[str]
     review_verdict: str
@@ -109,7 +122,14 @@ class IncidentState(TypedDict, total=False):
 
 
 Tool = Callable[..., Any]
-EVIDENCE_EXCERPT = 1500   # символов сырого вывода на свидетельство в промптах анализа
+EVIDENCE_EXCERPT = 3000   # символов сырого вывода на свидетельство: манифест входит целиком
+
+
+def system(prompt: str, identity: bool = False) -> dict:
+    """Системный промпт узла: SOUL (принципы) всегда, IDENTITY — оркестратору (ТЗ §7, MEMORY §4)."""
+    parts = [agent_file("IDENTITY.md")] if identity else []
+    parts += [agent_file("SOUL.md"), prompt]
+    return {"role": "system", "content": "\n\n".join(p for p in parts if p)}
 
 
 class Agent:
@@ -165,7 +185,7 @@ class Agent:
 
     def classify(self, state: IncidentState) -> dict:
         usage = Usage()
-        route = self.llm.structured([{"role": "system", "content": CLASSIFY},
+        route = self.llm.structured([system(CLASSIFY, identity=True),
                                      {"role": "user", "content": state["query"]}], Route, usage)
         return {"route": route.route, **self._usage(state, usage)}
 
@@ -173,17 +193,34 @@ class Agent:
         return {"report": REFUSAL}
 
     def runbook(self, state: IncidentState) -> dict:
+        """Ответ по runbook: раздел выбирается по оглавлению, читается только он (PageIndex)."""
         usage = Usage()
-        answer = self.llm.chat([{"role": "system", "content": RUNBOOK},
+        sections = runbook_sections()
+        titles = list(sections)
+        context = ""
+        if titles:
+            toc = "\n".join(f"{i}. {t}" for i, t in enumerate(titles))
+            pick = self.llm.structured([system(RUNBOOK_PICK), {"role": "user", "content":
+                                        f"Вопрос: {state['query']}\n\nОглавление:\n{toc}"}],
+                                       RunbookPick, usage)
+            if 0 <= pick.section < len(titles):
+                title = titles[pick.section]
+                context = f"\n\nРаздел runbook «{title}»:\n{sections[title]}"
+        answer = self.llm.chat([system(RUNBOOK + context),
                                 {"role": "user", "content": state["query"]}], usage)
         return {"report": answer.get("content") or "", **self._usage(state, usage)}
 
     def plan(self, state: IncidentState) -> dict:
+        """Оркестратор: подключает скилл по триггерам (F9) и строит план с его учётом (F2)."""
         usage = Usage()
-        plan = self.llm.structured([
-            {"role": "system", "content": PLAN.format(tools=", ".join(self.tools))},
-            {"role": "user", "content": state["query"]}], Plan, usage)
-        return {"plan": [step.model_dump() for step in plan.steps], **self._usage(state, usage)}
+        chosen = select_skill(state["query"])
+        prompt = PLAN.format(tools=", ".join(self.tools))
+        if chosen:
+            prompt += f"\n\nСкилл «{chosen[0].name}»:\n{chosen[0].body}"
+        plan = self.llm.structured([system(prompt), {"role": "user", "content": state["query"]}],
+                                   Plan, usage)
+        return {"plan": [step.model_dump() for step in plan.steps],
+                "active_skill": chosen[0].name if chosen else None, **self._usage(state, usage)}
 
     def diagnose(self, state: IncidentState) -> dict:
         store = self.store
@@ -194,8 +231,11 @@ class Agent:
                 f"Уже собрано:\n{self._evidence_text(state)}")
         if state.get("gaps"):
             task += "\n\nРевьюер просит дособрать:\n" + "\n".join(f"- {g}" for g in state["gaps"])
-        messages = [{"role": "system", "content": DIAGNOSE.format(budget=budget)},
-                    {"role": "user", "content": task}]
+        prompt = DIAGNOSE.format(budget=budget)
+        skill = next((s for s in load_skills() if s.name == state.get("active_skill")), None)
+        if skill:
+            prompt += f"\n\nСкилл «{skill.name}»:\n{skill.body}"
+        messages = [system(prompt), {"role": "user", "content": task}]
         usage, new_evidence, exhausted = Usage(), [], False
         while True:
             if calls_made >= budget or self._over_time(state):
@@ -256,7 +296,7 @@ class Agent:
     def analyze(self, state: IncidentState) -> dict:
         usage = Usage()
         result = self.llm.structured([
-            {"role": "system", "content": ANALYZE},
+            system(ANALYZE),
             {"role": "user", "content": f"Запрос: {state['query']}\n\nСвидетельства:\n"
                                         f"{self._evidence_text(state, detail=True)}"}],
             Hypotheses, usage)
@@ -269,7 +309,7 @@ class Agent:
         usage = Usage()
         hypotheses = json.dumps(state.get("hypotheses", []), ensure_ascii=False)
         verdict = self.llm.structured([
-            {"role": "system", "content": REVIEW},
+            system(REVIEW),
             {"role": "user", "content": f"Запрос: {state['query']}\n\nГипотезы: {hypotheses}\n\n"
                                         f"Свидетельства:\n{self._evidence_text(state, True)}"}],
             ReviewVerdict, usage)
@@ -292,7 +332,7 @@ class Agent:
         usage = Usage()
         hypotheses = json.dumps(state.get("hypotheses", []), ensure_ascii=False)
         proposal = self.llm.structured([
-            {"role": "system", "content": PROPOSE},
+            system(PROPOSE),
             {"role": "user", "content": f"Запрос: {state['query']}\n\nГипотезы: {hypotheses}\n\n"
                                         f"Свидетельства:\n{self._evidence_text(state, True)}"}],
             PatchProposal, usage, free_form=True)
@@ -381,6 +421,8 @@ def render_report(state: IncidentState) -> str:
     lines = ["# Отчёт об инциденте", "", "## Симптомы", "", state["query"], "",
              "## Свидетельства", ""]
     lines += [f"- `{e['id']}` {e['tool']} — {e['summary']}" for e in evidence] or ["- нет"]
+    if state.get("active_skill"):
+        lines += ["", f"Скилл: `{state['active_skill']}`"]
     lines += ["", "## Причина", ""]
     if hypotheses:
         top = hypotheses[0]

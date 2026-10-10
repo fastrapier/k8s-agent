@@ -134,3 +134,21 @@ def test_get_manifest_masks_before_evidence(config, store):
     evidence = store.get(result.evidence_id)
     assert SECRET_VALUE not in (store.raw(evidence.raw_ref) or "")
     assert MASK in (store.raw(evidence.raw_ref) or "")
+
+
+def test_get_manifest_drops_managed_fields_and_last_applied(config, store):
+    """Служебные копии манифеста вытесняли из промпта env: 6 из 7.7 тыс. символов."""
+    deployment = {
+        "kind": "Deployment",
+        "metadata": {"name": "api", "uid": "u-1", "generation": 2,
+                     "managedFields": [{"manager": "kubectl", "fieldsV1": {"f:spec": {}}}],
+                     "annotations": {"kubectl.kubernetes.io/last-applied-configuration": "{...}",
+                                     "deployment.kubernetes.io/revision": "3"}},
+        "spec": {"replicas": 1},
+    }
+    apps = SimpleNamespace(read_namespaced_deployment=lambda name, namespace: deployment)
+    result = k8s_get_manifest("Deployment", "api", "payments", clients=make_clients(apps=apps),
+                              store=store, config=config)
+    raw = store.raw(store.get(result.evidence_id).raw_ref)
+    assert "managedFields" not in raw and "last-applied-configuration" not in raw
+    assert "deployment.kubernetes.io/revision" in raw and "u-1" in raw   # нужное осталось

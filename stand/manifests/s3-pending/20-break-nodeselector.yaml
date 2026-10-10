@@ -18,11 +18,11 @@
 #
 # Ожидаемое исправление: убрать nodeSelector, либо навесить метку disktype=nvme на ноды,
 #   у которых действительно NVMe. Патч по пути spec.template.spec.nodeSelector.
+#
+# Причина поломки здесь, а не аннотацией в объекте: аннотация была бы подсказкой агенту,
+# который читает манифест.
 spec:
   template:
-    metadata:
-      annotations:
-        stand.k8s-incident-agent/root-cause: "nodeSelector disktype=nvme не совпадает ни с одной нодой"
     spec:
       nodeSelector:
         disktype: nvme
