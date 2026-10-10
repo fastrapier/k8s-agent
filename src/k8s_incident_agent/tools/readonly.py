@@ -117,7 +117,7 @@ def _api_error(exc: ApiException) -> str:
         except (ValueError, AttributeError):
             detail = str(exc.body)[:200]
     known = {
-        401: "не авторизован: токен ServiceAccount не принят",
+        401: "не авторизован: токен ServiceAccount не принят (истёк? выпустить: make stand-up)",
         403: "нет прав: read-only ServiceAccount не может читать этот ресурс",
         404: "объект не найден",
         409: "конфликт версий объекта",

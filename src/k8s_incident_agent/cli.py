@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import typer
 from pydantic import ValidationError
@@ -60,6 +61,12 @@ def run_tool(
     previous: bool | None = typer.Option(None, "--previous", help="лог предыдущего запуска"),
     deployment: str | None = typer.Option(None, "--deployment", help="имя Deployment"),
     raw: bool = typer.Option(False, "--raw", help="показать сырой вывод свидетельства"),
+    kubeconfig: str | None = typer.Option(
+        None,
+        "--kubeconfig",
+        help="подменить учётку диагноста: показать второй рубеж защиты (маскирование), "
+        "как если бы RBAC настроили шире; относительный путь — от текущего каталога",
+    ),
 ) -> None:
     """Вызвать один read-only инструмент и напечатать структурированный результат."""
     spec = READONLY_TOOLS.get(tool_name)
@@ -91,7 +98,16 @@ def run_tool(
             console.print(f"  {'.'.join(str(p) for p in error['loc'])}: {error['msg']}")
         raise typer.Exit(2) from exc
 
-    result = spec.func(**validated.model_dump())
+    call_args = validated.model_dump()
+    if kubeconfig:
+        # Только для ручного вызова: граф агента этой опции не видит.
+        path = str(Path(kubeconfig).expanduser())
+        config = get_config()
+        k8s = config.k8s.model_copy(update={"readonly_kubeconfig": path})
+        call_args["config"] = config.model_copy(update={"k8s": k8s})
+        console.print(f"ВНИМАНИЕ: вызов не под учёткой диагноста, а под {path}",
+                      style="bold yellow", markup=False)
+    result = spec.func(**call_args)
 
     colour = {"ok": "green", "degraded": "yellow", "error": "red"}[result.status]
     console.print(f"[{colour}]{result.status}[/{colour}] {result.evidence_id}: {result.summary}")

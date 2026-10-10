@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from typer.testing import CliRunner
 
 from conftest import api_error, make_clients, raising
-from k8s_incident_agent.k8s_clients import K8sClientError
+from k8s_incident_agent import cli
+from k8s_incident_agent.tools import ToolSpec
 from k8s_incident_agent.tools.readonly import k8s_describe, k8s_get_manifest, k8s_logs, k8s_top
+from k8s_incident_agent.tools.schemas import ToolArgs, ToolResult
 
 
 def test_object_not_found_is_structured_result(config, store):
@@ -46,17 +50,45 @@ def test_cluster_unreachable_is_structured_result(config, store):
     assert "кластер недоступен" in result.error
 
 
-def test_missing_kubeconfig_is_structured_result(config, store, monkeypatch):
+def test_missing_kubeconfig_is_structured_result(config, store):
     """Клиент не собрался — это тоже результат, а не падение процесса."""
-    import k8s_incident_agent.tools.readonly as readonly
-
-    monkeypatch.setattr(
-        readonly, "build_readonly_clients", raising(K8sClientError("нет файла kubeconfig"))
-    )
     result = k8s_describe("Pod", "api", "payments", store=store, config=config)
 
     assert result.status == "error"
     assert "kubeconfig" in result.error
+    assert "make stand-up" in result.error
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_cli_kubeconfig_override(config, monkeypatch, override):
+    received = []
+
+    def tool(**kwargs):
+        received.append(kwargs)
+        return ToolResult(tool="test", status="ok", evidence_id="ev-1", summary="готово")
+
+    monkeypatch.setattr(cli, "get_config", lambda: config)
+    monkeypatch.setattr(
+        cli, "READONLY_TOOLS", {"test": ToolSpec("test", tool, ToolArgs, "тестовый инструмент")}
+    )
+    args = ["tool", "test"]
+    if override:
+        args += ["--kubeconfig", "~/admin.kubeconfig"]
+
+    result = CliRunner().invoke(cli.app, args)
+
+    assert result.exit_code == 0, result.output
+    if override:
+        passed = received[0]["config"]
+        assert passed.k8s.readonly_kubeconfig == str(Path.home() / "admin.kubeconfig")
+        assert passed.k8s.readwrite_kubeconfig == config.k8s.readwrite_kubeconfig
+        assert passed is not config
+        assert config.k8s.readonly_kubeconfig is None
+        assert "ВНИМАНИЕ" in result.output
+        assert "admin.kubeconfig" in result.output
+    else:
+        assert received == [{}]
+        assert "ВНИМАНИЕ" not in result.output
 
 
 def test_unsupported_kind_is_structured_result(config, store):

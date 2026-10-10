@@ -58,6 +58,49 @@ namespace_exists() {
   kc get namespace "$NAMESPACE" >/dev/null 2>&1
 }
 
+# --- учётки агента (М2, docs/ISOLATION.md раздел 5) ---
+
+# kubeconfig'и учёток лежат в корне репозитория, в .kube/ (закрыт .gitignore).
+# Пути совпадают с k8s.readonly_kubeconfig / k8s.readwrite_kubeconfig в config.yaml.
+AGENT_KUBE_DIR="$(cd "$STAND_DIR/.." && pwd)/.kube"
+RO_KUBECONFIG="$AGENT_KUBE_DIR/agent-ro.kubeconfig"
+RW_KUBECONFIG="$AGENT_KUBE_DIR/agent-rw.kubeconfig"
+
+# kubeconfig для ServiceAccount агента: тот же API-сервер и CA, что у админского контекста,
+# но вместо сертификата администратора — токен учётки. Токен выпускается через TokenRequest
+# на сутки: украденный файл завтра бесполезен, а ./up.sh выпускает новый.
+# Использование: write_agent_kubeconfig <serviceaccount> <файл>
+write_agent_kubeconfig() {
+  local sa="$1" out="$2" server ca token
+  server="$(kc config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')"
+  ca="$(kc config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')"
+  token="$(kc create token "$sa" -n agent-system --duration=24h)"
+  mkdir -p "$(dirname "$out")" && chmod 700 "$(dirname "$out")"
+  rm -f "$out"   # umask действует только при создании файла
+  (
+    umask 077
+    cat >"$out" <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+  - name: $KUBE_CONTEXT
+    cluster:
+      server: $server
+      certificate-authority-data: $ca
+users:
+  - name: $sa
+    user:
+      token: $token
+contexts:
+  - name: $KUBE_CONTEXT
+    context:
+      cluster: $KUBE_CONTEXT
+      user: $sa
+current-context: $KUBE_CONTEXT
+EOF
+  )
+}
+
 # Ожидание симптома с таймаутом.
 # Использование: wait_for "человекочитаемое описание" функция_проверки
 # Функция проверки возвращает 0, когда условие выполнено.

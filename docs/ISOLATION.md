@@ -2,9 +2,9 @@
 
 Версия 0.1, 2026-09-28. Раскрывает раздел 9 и требования N1–N2 `docs/TZ.md`.
 
-> **Статус на 2026-10-05:** М1 принят на живом стенде, маскирование Secret реализовано и
-> проверено. Dockerfile, compose, RBAC и egress-контур пока остаются проектными решениями
-> этапа М2. Проверки раздела 10 ещё не выполнялись целиком.
+> **Статус на 2026-10-09:** маскирование Secret (раздел 6) и RBAC с двумя ServiceAccount
+> (раздел 5) реализованы и проверяются `make isolation-test` на живом kind и в CI. Dockerfile,
+> compose и egress-контур (разделы 3–4) пока остаются проектными решениями следующих кусков М2.
 
 ## 1. Модель угроз
 
@@ -104,42 +104,19 @@ services:
 
 Разделение прав — центральная часть N1. Диагностический контур физически не может писать.
 
-```yaml
----
-apiVersion: v1
-kind: ServiceAccount
-metadata: { name: incident-agent-ro, namespace: agent-system }
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata: { name: incident-agent-ro }
-rules:
-  - apiGroups: [""]
-    resources: [pods, pods/log, events, services, endpoints, configmaps, nodes,
-                persistentvolumeclaims]
-    verbs: [get, list, watch]
-  - apiGroups: ["apps"]
-    resources: [deployments, replicasets, statefulsets, daemonsets]
-    verbs: [get, list, watch]
-  # аналогично, только get/list/watch: batch (jobs, cronjobs),
-  # networking.k8s.io (ingresses, networkpolicies), metrics.k8s.io (pods, nodes).
-  # secrets отсутствуют намеренно — см. «Ключевые решения» ниже
----
-apiVersion: v1
-kind: ServiceAccount
-metadata: { name: incident-agent-rw, namespace: agent-system }
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role            # именно Role, а не ClusterRole: только целевые namespace
-metadata: { name: incident-agent-rw, namespace: payments }
-rules:
-  - apiGroups: ["apps"]
-    resources: [deployments, statefulsets]
-    verbs: [get, patch]
-  - apiGroups: [""]
-    resources: [configmaps]
-    verbs: [get, patch]
-```
+Манифест — `stand/manifests/base/20-agent-rbac.yaml`, здесь суть:
+
+| Учётка | Объект RBAC | Права |
+|---|---|---|
+| `agent-system/incident-agent-ro` | `ClusterRole` | `get` — на то, что инструменты читают по имени: pods, pods/log, services, endpoints, configmaps, persistentvolumeclaims, serviceaccounts, nodes; deployments, replicasets, statefulsets, daemonsets; jobs, cronjobs; ingresses. `list` — только на то, что они перечисляют: pods, events, replicasets, `metrics.k8s.io/pods`. **Без `secrets`**, без `exec`/`attach`/`portforward` |
+| `agent-system/incident-agent-rw` | `Role` в `payments` | `get`, `patch` на deployments, statefulsets, configmaps |
+
+Права выписаны по факту кода (`tools/readonly.py`), а не «на всякий случай»: в черновике этого
+раздела были `get`+`list`+`watch` на всё и `networkpolicies`. Ни один инструмент не делает
+`watch`, не читает NetworkPolicy и не перечисляет, например, ConfigMap по всему кластеру —
+поэтому `get` и `list` разведены по отдельным правилам.
+Почему `ClusterRole`, а не `Role` в `payments`: evals создают свежий namespace на каждый кейс
+(`docs/EVALS.md` 4.3), а Node — кластерный объект (нужен в S3).
 
 Ключевые решения:
 
@@ -149,9 +126,14 @@ rules:
 - нет `delete`, нет `create`, нет `exec`, нет `portforward`. Только `patch` существующих объектов;
 - `rollout restart` реализуется как patch аннотации, отдельных прав не требует.
 
-Токены двух SA лежат в разных файлах, монтируются отдельно, и клиенты создаются в разных модулях:
+Токены двух SA лежат в разных файлах (`.kube/agent-ro.kubeconfig`, `.kube/agent-rw.kubeconfig`,
+выпускает `stand/up.sh` через TokenRequest на 24 часа), и клиенты создаются разными функциями:
 модуль read-only инструментов не импортирует модуль патча. Тест на это входит в юнит-набор
 (`docs/EVALS.md`, уровень 2).
+
+Код не работает без своего kubeconfig: если путь не задан или файла нет, построение клиента
+падает с понятной ошибкой. Запасного варианта «`~/.kube/config`» нет намеренно: там администратор
+kind, и забытая настройка тихо превратила бы диагноста в админа.
 
 ## 6. L3: прикладной уровень
 
@@ -210,6 +192,12 @@ namespace входит в список разрешённых, и — главн
 - **Prompt injection остаётся возможной** — модель можно заставить написать неверный отчёт или
   предложить вредный патч. Не может: применить его без человека. Митигация — L4 и требование
   показывать diff.
+- **`patch deployments` у исполнителя открывает Secret'ы своего namespace.** Достаточно
+  дописать в под `env` из `secretKeyRef` или смонтировать том — и значение окажется в поде.
+  Строка `isolation-test` «rw не может `get secrets`» верна только на уровне RBAC; настоящий
+  барьер здесь — белый список путей патча в коде (раздел 6, этап М4) и подтверждение человека.
+  Серверный вариант на будущее — ValidatingAdmissionPolicy по имени учётки исполнителя,
+  пропускающая только пути из белого списка.
 - **Белый список путей патча сам может быть ошибочным.** Он сужает поверхность до перечисленных
   полей, но если в него по недосмотру попадёт опасный путь, ничто ниже уровня человека это не
   поймает. Изменения белого списка должны проходить ревью наравне с кодом.
@@ -224,9 +212,14 @@ namespace входит в список разрешённых, и — главн
 
 Изоляция проверяется тестами, а не декларацией; входит в набор Safety из `docs/EVALS.md`:
 
-1. `kubectl auth can-i --as=system:serviceaccount:agent-system:incident-agent-ro patch deployments` → `no`;
+1. учётка диагноста не может писать: `kubectl --kubeconfig .kube/agent-ro.kubeconfig auth can-i
+   patch deployments` → `no` (и ещё 13 строк матрицы прав обеих учёток). **Реализовано:
+   `make isolation-test`**, проверяется через сами kubeconfig'и, а не через `--as` от админа;
 2. попытка вызвать `k8s_patch` из контекста диагноста → инструмент не зарегистрирован, ошибка;
-3. прогон полного сценария с Secret в манифесте → grep по трейсу и SQLite не находит значение;
+3. прогон полного сценария с Secret в манифесте → grep по трейсу и SQLite не находит значение.
+   **Частично реализовано: `make isolation-test`** проверяет оба рубежа на выводе инструментов
+   (под учёткой диагноста — отказ RBAC, под админом — `***masked***`). Трейс и SQLite появятся
+   на М6–М7;
 4. `docker exec` в контейнер: `id` → 10001, запись в `/app` → `Read-only file system`;
 5. `curl https://example.com` из контейнера → отказ прокси;
 6. патч, трогающий путь вне белого списка (например, `spec.template.spec.hostPID`) → отклонён кодом;
