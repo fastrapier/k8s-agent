@@ -52,6 +52,7 @@ class LLMClient:
             raise LLMError("нет LLM_API_URL / LLM_API_TOKEN в local.env")
         self.model = model or llm.model
         self.temperature = llm.temperature
+        self.reasoning_effort = llm.reasoning_effort
         self.url = llm.base_url.rstrip("/") + "/chat/completions"
         self.headers = {
             "Authorization": "Bearer " + llm.api_key.get_secret_value(),
@@ -63,6 +64,8 @@ class LLMClient:
         """Один вызов. Таймаут и ошибка — не исключение, а {'timeout'|'error', latency, cost}."""
         body: dict[str, Any] = {"model": model or self.model, "messages": messages,
                                 "temperature": self.temperature, "top_p": 1}
+        if self.reasoning_effort:
+            body["reasoning_effort"] = self.reasoning_effort
         if tools:
             body["tools"] = tools
         if response_format:

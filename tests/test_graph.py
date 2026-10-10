@@ -34,6 +34,8 @@ class FakeLLM:
                  patch=S1_PATCH, fail: set[str] | None = None):
         self.route = route
         default = [{"tool_calls": [tool_call("k8s_list_pods", namespace="payments")]},
+                   {"tool_calls": [tool_call("k8s_get_manifest", kind="Deployment", name="api",
+                                             namespace="payments")]},
                    {"content": "фактов достаточно"}]
         self.chat_replies = list(chat if chat is not None else default)
         self.hypotheses = hypotheses
@@ -41,6 +43,7 @@ class FakeLLM:
         self.patch = patch
         self.fail = fail or set()
         self.tool_turns = 0
+        self.target = "api"
 
     def chat(self, messages, usage, tools=None):
         if "chat" in self.fail:
@@ -65,7 +68,8 @@ class FakeLLM:
             return ReviewVerdict(verdict=verdict, gaps=[] if verdict == "ok" else ["логи"])
         if schema is PatchProposal:
             patch = None if self.patch is None else {
-                "kind": "Deployment", "name": "api", "namespace": "payments", "patch": self.patch,
+                "kind": "Deployment", "name": self.target, "namespace": "payments",
+                "patch": self.patch,
                 "rationale": "вернуть ссылку на секрет", "evidence_ids": ["ev-001"]}
             return PatchProposal(patch=patch, recommendation="добавить DB_PASSWORD из Secret")
         raise AssertionError(schema)
@@ -77,14 +81,38 @@ def fake_list_pods(namespace=None, selector=None, *, store, config):
                       summary=evidence.summary, data={"pods": []})
 
 
+# Манифест так, как его отдаёт k8s_get_manifest: api без DB_PASSWORD, но Secret payments-db
+# виден — на него ссылается DB_USER. Из него граф берёт uid/generation и имена контейнеров.
+API_MANIFEST = """kind: Deployment
+metadata: {name: api, namespace: payments, uid: u-1, generation: 3}
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        env:
+        - name: DB_USER
+          valueFrom: {secretKeyRef: {name: payments-db, key: username}}
+"""
+
+
+def fake_get_manifest(kind, name, namespace=None, *, store, config):
+    evidence = store.add("k8s_get_manifest", {"kind": kind, "name": name, "namespace": namespace},
+                         f"манифест {kind} {name}", raw=API_MANIFEST)
+    return ToolResult(tool="k8s_get_manifest", status="ok", evidence_id=evidence.id,
+                      summary=evidence.summary, data={"manifest_yaml": API_MANIFEST})
+
+
 def run(llm: FakeLLM, config, resume: str | None = None):
     applied: list = []
 
     def apply_patch(*args, **kwargs):
-        applied.append(args)
+        applied.append((*args, kwargs.get("expected")))
         return {"status": "applied", "detail": "ok"}
 
-    agent = Agent(llm, config, tools={"k8s_list_pods": fake_list_pods}, apply_patch=apply_patch)
+    agent = Agent(llm, config, tools={"k8s_list_pods": fake_list_pods,
+                                      "k8s_get_manifest": fake_get_manifest},
+                  apply_patch=apply_patch)
     graph = build_graph(agent).compile(checkpointer=InMemorySaver())
     cfg = {"configurable": {"thread_id": "t"}}
     graph.invoke({"query": "под api падает", "started": time.time(), "evidence": []}, cfg)
@@ -112,7 +140,9 @@ def test_patch_waits_for_human_and_rejection_applies_nothing(config):
 
 def test_approval_applies_exactly_the_proposed_patch(config):
     state, applied, _ = run(FakeLLM(), config, resume="approved")
-    assert applied == [("Deployment", "api", "payments", S1_PATCH)]
+    # uid/generation — из прочитанного манифеста: исполнитель сверит, что объект тот же.
+    assert applied == [("Deployment", "api", "payments", S1_PATCH,
+                        {"uid": "u-1", "generation": 3})]
     assert state["execution_result"]["status"] == "applied"
 
 
@@ -128,7 +158,7 @@ def test_diagnostician_cannot_call_patch_tool(config):
                                                   namespace="payments", patch={})]},
                         {"content": "понял"}], patch=None)
     state, applied, _ = run(llm, config)
-    assert state["tool_calls"] == 0 and applied == []
+    assert not state.get("evidence") and applied == []
 
 
 def test_tool_budget_is_a_hard_ceiling(config):
@@ -178,5 +208,29 @@ def test_namespace_must_be_explicit(config):
                         {"tool_calls": [tool_call("k8s_list_pods", namespace="payments")]},
                         {"content": "готово"}], patch=None)
     state, _, _ = run(llm, config)
-    assert state["tool_calls"] == 1
     assert [e["args"]["namespace"] for e in state["evidence"]] == ["payments"]
+
+
+def test_failed_attempts_spend_budget(config):
+    """Ревью М4: вызов с ошибкой в аргументах тоже тратит бюджет — иначе цикл бесконечен."""
+    broken = [{"tool_calls": [tool_call("k8s_list_pods")]}] * 50
+    state, _, _ = run(FakeLLM(chat=broken, patch=None), config)
+    assert state["tool_calls"] == config.budget.max_tool_calls
+    assert state["budget_exhausted"] is True and not state.get("evidence")
+
+
+@pytest.mark.parametrize(("name", "patch", "reason"), [
+    ("checkout", S1_PATCH, "не читался"),
+    ("api", {"spec": {"template": {"spec": {"containers": [{"name": "sidecar", "env": [
+        {"name": "A", "value": "1"}]}]}}}}, "нет контейнеров"),
+    ("api", {"spec": {"template": {"spec": {"containers": [{"name": "api", "env": [
+        {"name": "A", "valueFrom": {"secretKeyRef": {"name": "admin-token", "key": "t"}}}]}]}}}},
+     "admin-token"),
+], ids=["unobserved-object", "unknown-container", "unseen-secret"])
+def test_patch_must_be_grounded_in_evidence(config, name, patch, reason):
+    """Ревью М4: белого списка мало — патч касается только увиденного объекта и Secret."""
+    llm = FakeLLM(patch=patch)
+    llm.target = name
+    state, applied, interrupted = run(llm, config, resume="approved")
+    assert not interrupted and applied == [] and state["proposed_patch"] is None
+    assert reason in state["recommendation"]

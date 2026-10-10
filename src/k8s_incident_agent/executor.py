@@ -28,22 +28,26 @@ from k8s_incident_agent.k8s_clients import (
 # код и RBAC — два независимых рубежа, и расширять их нужно осознанно, вместе.
 ALLOWED_NAMESPACES = {"payments"}
 
-# kind -> разрешённые префиксы путей strategic merge patch. `[*]` — любой элемент списка.
+# Переменная окружения — только значение или ссылка на ключ Secret/ConfigMap. fieldRef и
+# resourceFieldRef не нужны ни одному сценарию; `env: null` или `env: []` стёрли бы весь список.
+_ENV = "spec.template.spec.containers[*].env[*]"
+_WORKLOAD = (
+    "spec.replicas",
+    "spec.template.metadata.annotations",            # rollout restart — это аннотация
+    "spec.template.spec.containers[*].name",         # ключ слияния: без него не указать контейнер
+    f"{_ENV}.name",
+    f"{_ENV}.value",
+    f"{_ENV}.valueFrom.secretKeyRef.name",
+    f"{_ENV}.valueFrom.secretKeyRef.key",
+    f"{_ENV}.valueFrom.configMapKeyRef.name",
+    f"{_ENV}.valueFrom.configMapKeyRef.key",
+    "spec.template.spec.containers[*].resources.limits",     # OOMKilled — поднять лимит памяти
+    "spec.template.spec.containers[*].resources.requests",
+)
+# kind -> разрешённые пути strategic merge patch. `[*]` — любой элемент списка.
 ALLOWED_PATHS: dict[str, tuple[str, ...]] = {
-    "Deployment": (
-        "spec.replicas",
-        "spec.template.metadata.annotations",        # rollout restart — это аннотация
-        "spec.template.spec.containers[*].name",     # ключ слияния: без него не указать контейнер
-        "spec.template.spec.containers[*].env",
-        "spec.template.spec.containers[*].resources",   # OOMKilled — поднять лимит памяти
-    ),
-    "StatefulSet": (
-        "spec.replicas",
-        "spec.template.metadata.annotations",
-        "spec.template.spec.containers[*].name",
-        "spec.template.spec.containers[*].env",
-        "spec.template.spec.containers[*].resources",
-    ),
+    "Deployment": _WORKLOAD,
+    "StatefulSet": _WORKLOAD,
     "ConfigMap": ("data",),
 }
 
@@ -87,6 +91,22 @@ def strip_identity(kind: str, name: str, namespace: str, patch: dict) -> dict:
     return patch
 
 
+def _check_values(node: Any) -> None:
+    """Белый список путей не видит семантики слияния: `null` удаляет поле целиком, а директивы
+    `$patch`, `$retainKeys`, `$setElementOrder` меняют сам смысл merge. Ни то, ни другое агенту
+    не нужно — запрещаем по значению, а не по пути."""
+    if node is None:
+        raise PatchRejected("null в патче удаляет поле целиком — запрещено")
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if str(key).startswith("$"):
+                raise PatchRejected(f"директива слияния {key} запрещена")
+            _check_values(value)
+    elif isinstance(node, list):
+        for item in node:
+            _check_values(item)
+
+
 def validate_patch(kind: str, namespace: str, patch: dict) -> list[str]:
     """Проверка по белому списку. Возвращает пути патча или бросает PatchRejected."""
     if kind not in ALLOWED_PATHS:
@@ -97,19 +117,43 @@ def validate_patch(kind: str, namespace: str, patch: dict) -> list[str]:
                             f"разрешены: {sorted(ALLOWED_NAMESPACES)}")
     if not isinstance(patch, dict) or not patch:
         raise PatchRejected("патч пустой")
+    _check_values(patch)
     paths = patch_paths(patch)
     denied = [p for p in paths if not _allowed(p, ALLOWED_PATHS[kind])]
     if denied:
         raise PatchRejected(f"пути вне белого списка для {kind}: {', '.join(sorted(set(denied)))}")
+    replicas = (patch.get("spec") or {}).get("replicas")
+    if replicas is not None and (not isinstance(replicas, int) or replicas < 1):
+        # replicas: 0 «чинит» CrashLoop, выключая сервис, и пост-проверка сочла бы это успехом.
+        raise PatchRejected("spec.replicas должен быть целым ≥ 1")
     return paths
 
 
+def patch_containers(patch: dict) -> set[str]:
+    """Имена контейнеров, которые затрагивает патч рабочей нагрузки."""
+    containers = (((patch.get("spec") or {}).get("template") or {}).get("spec") or {}) \
+        .get("containers") or []
+    return {c.get("name") for c in containers if isinstance(c, dict)}
+
+
+def _read(ro: ReadOnlyClients, kind: str, name: str, namespace: str) -> Any:
+    if kind == "Deployment":
+        return ro.apps.read_namespaced_deployment(name, namespace)
+    if kind == "StatefulSet":
+        return ro.apps.read_namespaced_stateful_set(name, namespace)
+    return ro.core.read_namespaced_config_map(name, namespace)
+
+
 def apply_patch(
-    kind: str, name: str, namespace: str, patch: dict, *,
+    kind: str, name: str, namespace: str, patch: dict, *, expected: dict | None = None,
     rw: ReadWriteClients | None = None, ro: ReadOnlyClients | None = None,
     config: AppConfig | None = None, wait_seconds: int = 90,
 ) -> dict:
     """Применить проверенный патч и проверить результат (пост-проверка, F7).
+
+    `expected` — uid и generation объекта, каким его видел агент, когда предлагал патч. Человек
+    подтверждал патч к тому объекту; если его с тех пор пересоздали или изменили spec, патч не
+    применяется — нужен новый прогон (между показом и подтверждением может пройти час).
 
     Отката нет намеренно (ARCHITECTURE §8): если пост-проверка не прошла, результат помечается
     `post_check_failed`, и человеку выдаётся команда отката — решение о ней за ним.
@@ -117,6 +161,23 @@ def apply_patch(
     patch = strip_identity(kind, name, namespace, patch)
     validate_patch(kind, namespace, patch)
     config = config or get_config()
+    ro = ro or build_readonly_clients(config)
+    try:
+        live = _read(ro, kind, name, namespace)
+    except ApiException as exc:
+        return {"status": "apply_failed", "detail": f"объект не прочитан: {exc.status}"}
+    if expected:
+        seen = (expected.get("uid"), expected.get("generation"))
+        now = (live.metadata.uid, live.metadata.generation)
+        if seen != now:
+            return {"status": "stale", "detail": f"объект изменился после показа патча "
+                    f"(uid/generation {seen} → {now}); патч не применён, нужен новый прогон"}
+    if kind != "ConfigMap":
+        unknown = patch_containers(patch) - {c.name for c in live.spec.template.spec.containers}
+        if unknown:
+            # Strategic merge добавил бы новый контейнер вместо правки существующего.
+            return {"status": "apply_failed",
+                    "detail": f"в {kind}/{name} нет контейнеров {sorted(unknown)}"}
     rw = rw or build_readwrite_clients(config)
     try:
         if kind == "Deployment":
@@ -132,13 +193,10 @@ def apply_patch(
     if kind == "ConfigMap":
         return {"status": "applied",
                 "detail": "ConfigMap обновлён; поды перечитают его при рестарте"}
-    ro = ro or build_readonly_clients(config)
     deadline = time.monotonic() + wait_seconds
     status: dict = {}
     while time.monotonic() < deadline:
-        reader = (ro.apps.read_namespaced_deployment if kind == "Deployment"
-                  else ro.apps.read_namespaced_stateful_set)
-        obj = reader(name, namespace)
+        obj = _read(ro, kind, name, namespace)
         want = obj.spec.replicas or 0
         status = {"desired": want, "updated": obj.status.updated_replicas or 0,
                   "ready": obj.status.ready_replicas or 0}

@@ -158,11 +158,14 @@ def _progress(node: str, change: dict) -> str:
 
 @app.command("run")
 def run_incident(
-    query: str = typer.Argument(..., help="описание проблемы, как его написал бы инженер"),
-    thread: str | None = typer.Option(None, "--thread", help="id инцидента для продолжения"),
+    query: str = typer.Argument("", help="описание проблемы, как его написал бы инженер"),
+    thread: str | None = typer.Option(
+        None, "--thread", help="id инцидента, ждущего подтверждения патча: продолжить его"),
     model: str | None = typer.Option(None, "--model", help="модель вместо llm.model из конфига"),
 ) -> None:
     """Расследовать инцидент. Патч применяется только после вашего подтверждения."""
+    if not query and not thread:
+        raise typer.BadParameter("нужно описание проблемы или --thread")
     from langgraph.checkpoint.sqlite import SqliteSaver
     from langgraph.types import Command
 
@@ -181,22 +184,35 @@ def run_incident(
         graph = build_graph(agent).compile(checkpointer=saver)
         run_config = {"configurable": {"thread_id": thread_id}}
         payload: object = {"query": query, "started": time.time(), "evidence": []}
+        pending = None
+        if thread:
+            # --thread — только чтобы ответить на ждущее подтверждение. Новый запрос поверх
+            # старого чекпоинта унаследовал бы чужие свидетельства и счётчики (ревью М4).
+            interrupts = graph.get_state(run_config).interrupts
+            if not interrupts:
+                console.print(f"[red]у инцидента {thread} нет патча, ждущего подтверждения[/red]")
+                raise typer.Exit(1)
+            payload, pending = None, interrupts[0].value
         while True:
-            pending = None
-            for update in graph.stream(payload, run_config, stream_mode="updates"):
-                for node, change in update.items():
-                    if node == "__interrupt__":
-                        pending = change[0].value
-                    elif line := _progress(node, change):
-                        console.print(f"[cyan]{node:>9}[/cyan] {escape(line)}")
+            if payload is not None:
+                pending = None
+                for update in graph.stream(payload, run_config, stream_mode="updates"):
+                    for node, change in update.items():
+                        if node == "__interrupt__":
+                            pending = change[0].value
+                        elif line := _progress(node, change):
+                            console.print(f"[cyan]{node:>9}[/cyan] {escape(line)}")
             if pending is None:
                 break
-            # F6: человек видит объект, патч, обоснование — и решает сам.
+            # F6: человек видит объект, патч, обоснование и свидетельства — и решает сам.
             patch = pending["patch"]
             console.print(f"\n[bold yellow]Предлагается патч {patch['kind']}/{patch['name']} "
                           f"в {patch['namespace']}[/bold yellow]")
             console.print(Syntax(json.dumps(patch["patch"], ensure_ascii=False, indent=2), "json"))
+            console.print(escape(f"Почему: {patch['rationale']} (свидетельства: "
+                                 f"{', '.join(patch['evidence_ids'])})"), highlight=False)
             console.print(escape(pending["recommendation"]), markup=False)
+            console.print(f"[dim]ответить позже: k8s-agent run --thread {thread_id}[/dim]")
             approved = typer.confirm("Применить патч?", default=False)
             payload = Command(resume="approved" if approved else "rejected")
         report = graph.get_state(run_config).values.get("report", "")

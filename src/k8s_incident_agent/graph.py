@@ -22,6 +22,7 @@ import time
 from collections.abc import Callable
 from typing import Annotated, Any, TypedDict
 
+import yaml
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from pydantic import ValidationError
@@ -212,32 +213,34 @@ class Agent:
                 break
             messages.append(message)
             for call in calls:
-                content, executed = self._run_tool(call, store, new_evidence, calls_made < budget)
-                calls_made += executed
+                # Считается каждая попытка: иначе модель могла бы бесконечно слать вызовы
+                # с ошибкой в аргументах, не расходуя бюджет (ревью М4).
+                content = self._run_tool(call, store, new_evidence, calls_made < budget)
+                calls_made += 1
                 messages.append({"role": "tool", "tool_call_id": call.get("id"),
                                  "content": content})
         return {"evidence": new_evidence, "tool_calls": calls_made, "budget_exhausted": exhausted,
                 **self._usage(state, usage)}
 
     def _run_tool(self, call: dict, store: EvidenceStore, new_evidence: list,
-                  allowed: bool) -> tuple[str, bool]:
-        """Выполнить вызов модели: (текст для модели, был ли инструмент реально вызван)."""
+                  allowed: bool) -> str:
+        """Выполнить вызов модели; вернуть текст для модели (результат или отказ)."""
         function = call.get("function") or {}
         name = function.get("name") or ""
         if name not in self.tools:
-            return f"ошибка: инструмент {name} не зарегистрирован у диагноста", False
+            return f"ошибка: инструмент {name} не зарегистрирован у диагноста"
         if not allowed:
-            return "ошибка: бюджет вызовов инструментов исчерпан", False
+            return "ошибка: бюджет вызовов инструментов исчерпан"
         try:
             args = json.loads(function.get("arguments") or "{}")
             READONLY_TOOLS[name].args_model.model_validate(args)
         except (json.JSONDecodeError, ValidationError) as exc:
-            return f"ошибка: аргументы не по схеме {name}: {str(exc).splitlines()[0]}", False
+            return f"ошибка: аргументы не по схеме {name}: {str(exc).splitlines()[0]}"
         # Тихий namespace по умолчанию — ловушка: живой прогон получил 11 раз «подов 0» из
         # default вместо payments. Агент называет namespace явно (кроме кластерной Node).
         if ("namespace" in READONLY_TOOLS[name].args_model.model_fields
                 and not args.get("namespace") and str(args.get("kind", "")).lower() != "node"):
-            return f"ошибка: укажи namespace явно в аргументах {name}", False
+            return f"ошибка: укажи namespace явно в аргументах {name}"
         result = self.tools[name](**args, store=store, config=self.config)
         evidence = store.get(result.evidence_id)
         if evidence is not None:
@@ -248,7 +251,7 @@ class Agent:
         # Вывод кластера идёт отдельным сообщением role=tool; что это данные, а не инструкции,
         # сказано в системном промпте диагноста (ISOLATION §6).
         body, _ = truncate(payload, self.config.tools.max_output_chars)
-        return body, True
+        return body
 
     def analyze(self, state: IncidentState) -> dict:
         usage = Usage()
@@ -300,11 +303,46 @@ class Agent:
                 patch["patch"] = write_contour.strip_identity(
                     patch["kind"], patch["name"], patch["namespace"], patch["patch"])
                 write_contour.validate_patch(patch["kind"], patch["namespace"], patch["patch"])
+                patch["expected"] = self._ground(patch, state)
             except write_contour.PatchRejected as exc:
                 recommendation += f"\n\nАвтоматический патч не предложен: {exc}."
                 patch = None
         return {"proposed_patch": patch, "recommendation": recommendation,
                 **self._usage(state, usage)}
+
+    def _ground(self, patch: dict, state: IncidentState) -> dict:
+        """Патч привязан к фактам, а не только к белому списку (ревью М4).
+
+        Целевой объект — тот, чей манифест агент прочитал в этом инциденте: иначе строка лога
+        могла бы увести патч на соседний Deployment. Из того же манифеста берутся uid и
+        generation — исполнитель сверит их перед применением. Контейнеры — только существующие,
+        Secret/ConfigMap в ссылках — только те, что встречались в прочитанных манифестах.
+        """
+        evidence = state.get("evidence", [])
+        if not set(patch["evidence_ids"]) <= {e["id"] for e in evidence}:
+            raise write_contour.PatchRejected("патч ссылается на несуществующие свидетельства")
+        manifests = [e for e in evidence if e["tool"] == "k8s_get_manifest" and e.get("raw_ref")]
+        texts = [self.store.raw(e["raw_ref"]) or "" for e in manifests]
+        target = next((yaml.safe_load(text) for e, text in zip(manifests, texts, strict=True)
+                       if e["args"].get("kind", "").lower() == patch["kind"].lower()
+                       and e["args"].get("name") == patch["name"]
+                       and e["args"].get("namespace") == patch["namespace"]), None)
+        if not isinstance(target, dict):
+            raise write_contour.PatchRejected(
+                f"манифест {patch['kind']}/{patch['name']} не читался в этом инциденте")
+        meta = target.get("metadata") or {}
+        if patch["kind"] != "ConfigMap":
+            spec = ((target.get("spec") or {}).get("template") or {}).get("spec") or {}
+            known = {c.get("name") for c in spec.get("containers") or []}
+            unknown = write_contour.patch_containers(patch["patch"]) - known
+            if unknown:
+                raise write_contour.PatchRejected(f"в манифесте нет контейнеров {sorted(unknown)}")
+        refs = {ref["name"] for ref in _env_refs(patch["patch"])}
+        unseen = sorted(r for r in refs if not any(r in text for text in texts))
+        if unseen:
+            raise write_contour.PatchRejected(f"ссылки на объекты, не встречавшиеся в "
+                                              f"прочитанных манифестах: {unseen}")
+        return {"uid": meta.get("uid"), "generation": meta.get("generation")}
 
     def approval(self, state: IncidentState) -> dict:
         decision = interrupt({"patch": state["proposed_patch"],
@@ -318,10 +356,22 @@ class Agent:
             return {"execution_result": None}
         p = state["proposed_patch"]
         return {"execution_result": self.apply_patch(p["kind"], p["name"], p["namespace"],
-                                                     p["patch"], config=self.config)}
+                                                     p["patch"], expected=p.get("expected"),
+                                                     config=self.config)}
 
     def report(self, state: IncidentState) -> dict:
         return {"report": render_report(state)}
+
+
+def _env_refs(patch: dict) -> list[dict]:
+    """secretKeyRef/configMapKeyRef из env патча рабочей нагрузки."""
+    refs = []
+    for container in (((patch.get("spec") or {}).get("template") or {}).get("spec") or {}) \
+            .get("containers") or []:
+        for env in container.get("env") or []:
+            source = env.get("valueFrom") or {}
+            refs += [source[k] for k in ("secretKeyRef", "configMapKeyRef") if k in source]
+    return refs
 
 
 def render_report(state: IncidentState) -> str:
