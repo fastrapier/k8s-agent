@@ -3,8 +3,9 @@
 # Поломка: selector сервиса остался от релиза v1 (version: v1), а поды после релиза
 #   имеют метку version: v2. Ни один под под selector не подходит → EndpointSlice пуст.
 #
-# Симптом, который увидит инженер:
-#   - внешний запрос через Ingress отдаёт 502 (нет ни одного upstream);
+# Жалоба в S2 — «отдаёт 502». Контроллер на стенде не ставится; агент идёт по объектам.
+# ingress-nginx на сервис без endpoints ответил бы 503 (проверено 2026-10-09).
+# Симптомы на стенде:
 #   - kubectl get endpoints web -n payments  →  ENDPOINTS: <none>;
 #   - kubectl get endpointslices -n payments -l kubernetes.io/service-name=web → без адресов;
 #   - при этом kubectl get pods -n payments -l app=web  →  2/2 Running, Ready.

@@ -3,8 +3,8 @@
 # Сам Ingress корректен. Он нужен, чтобы в кластере существовало верхнее звено цепочки
 # Ingress → Service → Endpoints → Pods, которую агент обязан пройти (ТЗ раздел 2, S2).
 #
-# В М1 ingress-controller намеренно не ставится (см. stand/README.md): 502 воспроизводится
-# на уровне объектов — пустой EndpointSlice у сервиса, на который ссылается Ingress.
+# Контроллер на стенде не ставится; агент проходит цепочку по объектам API.
+# ingress-nginx на сервис без endpoints ответил бы 503 (проверено 2026-10-09).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

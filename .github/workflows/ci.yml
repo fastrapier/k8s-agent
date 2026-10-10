@@ -52,3 +52,7 @@ jobs:
             exit 1
           fi
           grep -q '\*\*\*masked\*\*\*' demo-s1.txt
+      - name: k8s_top отдаёт метрики (metrics-server на стенде)
+        run: |
+          make tool TOOL=k8s_top ARGS="--ns payments" | tee top.txt
+          grep -q '^ok ' top.txt
