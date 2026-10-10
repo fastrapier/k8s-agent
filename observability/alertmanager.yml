@@ -1,0 +1,20 @@
+route:
+  receiver: telegram-warnings
+  group_by: [alertname]
+  group_interval: 30m
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: telegram
+      group_wait: 0s
+
+receivers:
+  # Токен лежит в файле вне git; путь приходит из каталога secrets в compose.
+  - name: telegram
+    telegram_configs:
+      - bot_token_file: /etc/alertmanager/secrets/telegram_token
+        chat_id: 123456789
+  - name: telegram-warnings
+    telegram_configs:
+      - bot_token_file: /etc/alertmanager/secrets/telegram_token
+        chat_id: 123456789

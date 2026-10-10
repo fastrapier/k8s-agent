@@ -31,3 +31,7 @@ models/
 
 # Чекпоинты графа и эпизодическая память: вывод кластера, в git не место.
 data/
+
+# Telegram-токен Alertmanager хранится только локально.
+observability/secrets/*
+!observability/secrets/.gitkeep

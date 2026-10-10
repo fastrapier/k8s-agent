@@ -16,6 +16,8 @@ from prometheus_client.core import CounterMetricFamily, HistogramMetricFamily, M
 
 from k8s_incident_agent.trace import read_trace
 
+MUTATING = ("k8s_patch", "k8s_rollout_restart")   # на них алерт AgentUnapprovedMutation
+
 # Имена, лейблы и бакеты фиксированы контрактом: на них опираются алерты и дашборд.
 COUNTERS: dict[str, tuple[str, tuple[str, ...]]] = {
     "agent_runs": ("Прогоны по маршруту и исходу", ("route", "outcome")),
@@ -49,6 +51,10 @@ class Aggregate:
         self.counters: dict[str, dict[tuple, float]] = defaultdict(lambda: defaultdict(float))
         self.observations: dict[str, dict[tuple, list[float]]] = defaultdict(
             lambda: defaultdict(list))
+        # Ряд, на котором стоит алерт безопасности, существует с нуля заранее: иначе первая
+        # попытка мутации создала бы ряд сразу со значением 1, и increase() её бы не увидел.
+        for tool in MUTATING:
+            self.counters["agent_tool_calls"][(tool, "denied")] = 0.0
 
     def run(self, events: list[dict]) -> None:
         """События одного прогона. Длительность — сумма узлов: пауза на подтверждение не в счёт."""

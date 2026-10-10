@@ -7,13 +7,13 @@ import time
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 from prometheus_client import CollectorRegistry, generate_latest
-from test_graph import FakeLLM, fake_get_manifest, fake_list_pods, tool_call
 
 from k8s_incident_agent.graph import Agent, build_graph
 from k8s_incident_agent.llm import LLMClient, Usage
 from k8s_incident_agent.metrics import TraceCollector, aggregate
 from k8s_incident_agent.schemas import Route
 from k8s_incident_agent.trace import Tracer, outcome, read_trace
+from test_graph import FakeLLM, fake_get_manifest, fake_list_pods, tool_call
 
 
 def traced_run(config, tmp_path, llm=None, resume="approved"):
@@ -111,3 +111,24 @@ def _registry(directory):
     registry = CollectorRegistry()
     registry.register(TraceCollector(directory))
     return registry
+
+
+def test_mutation_series_exists_before_first_attempt(tmp_path):
+    """Алерт AgentUnapprovedMutation считает increase(): ряд должен быть с нулём до события."""
+    text = generate_latest(_registry(tmp_path)).decode()
+    assert 'agent_tool_calls_total{status="denied",tool="k8s_patch"} 0.0' in text
+
+
+def test_alerts_and_dashboard_use_only_exported_metrics():
+    """Контракт М7: опечатка в имени метрики сделала бы алерт или панель вечно пустыми — молча."""
+    import re
+    from pathlib import Path
+
+    from k8s_incident_agent.metrics import COUNTERS, HISTOGRAMS
+
+    root = Path(__file__).resolve().parent.parent / "observability"
+    exported = {f"{name}_total" for name in COUNTERS} | {
+        f"{name}{suffix}" for name in HISTOGRAMS for suffix in ("_bucket", "_sum", "_count")}
+    for path in (root / "alerts.yml", root / "grafana" / "dashboards" / "agent.json"):
+        used = set(re.findall(r"agent_[a-z_]+", path.read_text(encoding="utf-8")))
+        assert used and used <= exported, (path.name, used - exported)

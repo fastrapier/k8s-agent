@@ -295,13 +295,19 @@ def run_incident(
 
 
 @app.command("trace")
-def show_trace(run_id: str = typer.Argument(..., help="id из строки «инцидент …»")) -> None:
+def show_trace(
+    run_id: str = typer.Argument("", help="id из строки «инцидент …»"),
+    last: bool = typer.Option(False, "--last", help="последний прогон"),
+) -> None:
     """Трейс прогона по шагам: узлы, вызовы модели и инструментов, время и цена (N5)."""
     from k8s_incident_agent.trace import read_trace
 
+    if last:
+        files = sorted(_traces_dir().glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+        run_id = files[-1].stem if files else ""
     path = _traces_dir() / f"{run_id}.jsonl"
-    if not path.is_file():
-        console.print(f"[red]трейса {run_id} нет в data/traces[/red]")
+    if not run_id or not path.is_file():
+        console.print(f"[red]трейса {run_id or '—'} нет в data/traces[/red]")
         raise typer.Exit(1)
     events = read_trace(path)
     table = Table("t, с", "узел", "событие", "детали", "с", "$", title=f"трейс {run_id}")
