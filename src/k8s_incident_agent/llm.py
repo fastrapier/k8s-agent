@@ -19,6 +19,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from k8s_incident_agent.config import AppConfig, get_config
+from k8s_incident_agent.trace import NULL_TRACER, Tracer
 
 TIMEOUT = 120               # таймаут одного вызова, LLM_SELECTION §5
 GATEWAY_RETRIES = 3         # 429 и 5xx повторяются, это сбой шлюза, а не ответ модели
@@ -46,8 +47,10 @@ class Usage:
 
 
 class LLMClient:
-    def __init__(self, config: AppConfig | None = None, model: str | None = None) -> None:
+    def __init__(self, config: AppConfig | None = None, model: str | None = None,
+                 tracer: Tracer | None = None) -> None:
         llm = (config or get_config()).llm
+        self.tracer = tracer or NULL_TRACER
         if not llm.base_url or not llm.api_key:
             raise LLMError("нет LLM_API_URL / LLM_API_TOKEN в local.env")
         self.model = model or llm.model
@@ -60,8 +63,21 @@ class LLMClient:
         }
 
     def raw(self, messages: list, tools: list | None = None,
-            response_format: dict | None = None, model: str | None = None) -> dict:
-        """Один вызов. Таймаут и ошибка — не исключение, а {'timeout'|'error', latency, cost}."""
+            response_format: dict | None = None, model: str | None = None,
+            label: str = "") -> dict:
+        """Один вызов. Таймаут и ошибка — не исключение, а {'timeout'|'error', latency, cost}.
+        Каждый вызов — событие `llm` в трейсе: латентность, цена, токены, промпт и ответ."""
+        reply = self._call(messages, tools, response_format, model)
+        self.tracer.emit(
+            "llm", model=model or self.model, label=label or ("tools" if tools else "chat"),
+            status="ok" if "message" in reply else ("timeout" if reply.get("timeout") else "error"),
+            latency=round(reply["latency"], 3), cost=reply["cost"],
+            tokens_in=reply.get("tokens_in", 0), tokens_out=reply.get("tokens_out", 0),
+            messages=messages, response=reply.get("message"), error=reply.get("error"))
+        return reply
+
+    def _call(self, messages: list, tools: list | None, response_format: dict | None,
+              model: str | None) -> dict:
         body: dict[str, Any] = {"model": model or self.model, "messages": messages,
                                 "temperature": self.temperature, "top_p": 1}
         if self.reasoning_effort:
@@ -77,10 +93,13 @@ class LLMClient:
                 request = urllib.request.Request(self.url, data, self.headers)
                 with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
                     payload = json.load(response)
+                usage = payload.get("usage") or {}
                 return {
                     "message": payload["choices"][0]["message"],
                     "latency": time.monotonic() - started,
-                    "cost": float((payload.get("usage") or {}).get("cost") or 0.0),
+                    "cost": float(usage.get("cost") or 0.0),
+                    "tokens_in": usage.get("prompt_tokens") or 0,
+                    "tokens_out": usage.get("completion_tokens") or 0,
                 }
             except TimeoutError:
                 return {"timeout": True, "latency": float(TIMEOUT), "cost": 0.0}
@@ -97,7 +116,7 @@ class LLMClient:
 
     def chat(self, messages: list, usage: Usage, tools: list | None = None) -> dict:
         """Вызов для графа: учитывает стоимость, сбой шлюза — исключение LLMError."""
-        reply = self.raw(messages, tools=tools)
+        reply = self.raw(messages, tools=tools, label="tools" if tools else "chat")
         usage.add(reply)
         if "message" not in reply:
             raise LLMError(reply.get("error") or "таймаут шлюза")
@@ -122,7 +141,7 @@ class LLMClient:
                 "name": schema.__name__, "schema": schema.model_json_schema()}}
         error = ""
         for _ in range(FORMAT_RETRIES + 1):
-            reply = self.raw(messages, response_format=response_format)
+            reply = self.raw(messages, response_format=response_format, label=schema.__name__)
             usage.add(reply)
             if "message" not in reply:
                 raise LLMError(reply.get("error") or "таймаут шлюза")
@@ -130,6 +149,8 @@ class LLMClient:
                 return schema.model_validate(parse_json(reply["message"]))
             except (json.JSONDecodeError, ValidationError) as exc:
                 error = " ".join(str(exc).split())[:400]   # какие поля не так — видно в отчёте
+                self.tracer.emit("format_retry", model=self.model, label=schema.__name__,
+                                 error=error)
                 messages += [reply["message"], {"role": "user", "content":
                              f"Ответ не прошёл валидацию: {error}. Верни исправленный JSON."}]
         raise LLMError(f"модель не дала валидный {schema.__name__}: {error}")

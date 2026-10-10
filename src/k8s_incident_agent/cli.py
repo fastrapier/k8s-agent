@@ -2,6 +2,8 @@
 
 * `k8s-agent run "<описание проблемы>"` — расследование инцидента графом агента (М4);
 * `k8s-agent memory list|search|seed` — эпизодическая память прошлых инцидентов (М6);
+* `k8s-agent trace <id>` — трейс прогона: узлы, вызовы модели и инструментов, время и цена (М7);
+* `k8s-agent metrics serve|show` — метрики Prometheus, посчитанные из трейсов (М7);
 * `k8s-agent config show` — печать конфига с замаскированным токеном;
 * `k8s-agent tool <имя> [аргументы]` — прямой вызов одного read-only инструмента, без графа и LLM.
 """
@@ -11,6 +13,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -34,6 +37,12 @@ config_app = typer.Typer(no_args_is_help=True, help="Конфигурация.")
 app.add_typer(config_app, name="config")
 memory_app = typer.Typer(no_args_is_help=True, help="Эпизодическая память прошлых инцидентов.")
 app.add_typer(memory_app, name="memory")
+metrics_app = typer.Typer(no_args_is_help=True, help="Метрики Prometheus из трейсов прогонов.")
+app.add_typer(metrics_app, name="metrics")
+
+
+def _traces_dir() -> Path:
+    return find_repo_root() / "data" / "traces"
 
 console = Console()
 
@@ -219,13 +228,15 @@ def run_incident(
     from k8s_incident_agent.graph import Agent, build_graph
     from k8s_incident_agent.knowledge import load_skills
     from k8s_incident_agent.llm import LLMClient
+    from k8s_incident_agent.trace import Tracer
 
     config = get_config()
     thread_id = thread or uuid.uuid4().hex[:8]
     checkpoints = find_repo_root() / "data" / "checkpoints.sqlite"
     checkpoints.parent.mkdir(exist_ok=True)
-    llm = LLMClient(config, model=model)
-    agent = Agent(llm, config, memory=_memory())
+    tracer = Tracer(_traces_dir() / f"{thread_id}.jsonl", thread_id)
+    llm = LLMClient(config, model=model, tracer=tracer)
+    agent = Agent(llm, config, memory=_memory(), tracer=tracer)
     console.print(f"[dim]инцидент {thread_id}, модель {llm.model}[/dim]")
 
     with SqliteSaver.from_conn_string(str(checkpoints)) as saver:
@@ -242,6 +253,8 @@ def run_incident(
                 console.print(f"[red]у инцидента {thread} нет патча, ждущего подтверждения[/red]")
                 raise typer.Exit(1)
             payload, pending = None, interrupts[0].value
+        else:
+            tracer.emit("run_start", query=query, model=llm.model)
         while True:
             if payload is not None:
                 pending = None
@@ -267,11 +280,93 @@ def run_incident(
                                  f"{', '.join(patch['evidence_ids'])})"), highlight=False)
             console.print(escape(pending["recommendation"]), markup=False)
             console.print(f"[dim]ответить позже: k8s-agent run --thread {thread_id}[/dim]")
+            asked = time.monotonic()
             approved = typer.confirm("Применить патч?", default=False)
-            payload = Command(resume="approved" if approved else "rejected")
-        report = graph.get_state(run_config).values.get("report", "")
+            decision = "approved" if approved else "rejected"
+            tracer.emit("approval", node="approval", decision=decision,
+                        wait_seconds=round(time.monotonic() - asked, 1))
+            payload = Command(resume=decision)
+        final = graph.get_state(run_config).values
+        tracer.finish(final)
+        report = final.get("report", "")
     console.print()
     console.print(Markdown(report))
+    console.print(f"[dim]трейс: k8s-agent trace {thread_id}[/dim]")
+
+
+@app.command("trace")
+def show_trace(run_id: str = typer.Argument(..., help="id из строки «инцидент …»")) -> None:
+    """Трейс прогона по шагам: узлы, вызовы модели и инструментов, время и цена (N5)."""
+    from k8s_incident_agent.trace import read_trace
+
+    path = _traces_dir() / f"{run_id}.jsonl"
+    if not path.is_file():
+        console.print(f"[red]трейса {run_id} нет в data/traces[/red]")
+        raise typer.Exit(1)
+    events = read_trace(path)
+    table = Table("t, с", "узел", "событие", "детали", "с", "$", title=f"трейс {run_id}")
+    start = None
+    for e in events:
+        ts = datetime.fromisoformat(e["ts"])
+        start = start or ts
+        seconds = e.get("seconds", e.get("latency", e.get("wait_seconds", "")))
+        cost = f"{e['cost']:.4f}" if e.get("cost") else ""
+        table.add_row(f"{(ts - start).total_seconds():.1f}", e.get("node", ""), e["event"],
+                      escape(_trace_details(e)), str(seconds), cost)
+    console.print(table)
+
+
+def _trace_details(e: dict) -> str:
+    kind = e["event"]
+    if kind == "llm":
+        tokens = f"{e.get('tokens_in', 0)}→{e.get('tokens_out', 0)} ток."
+        return f"{e.get('label', '')} {e.get('model', '')} {e.get('status', '')} {tokens}"
+    if kind == "tool":
+        args = ", ".join(f"{k}={v}" for k, v in (e.get("args") or {}).items())
+        result = e.get("evidence_id") or e.get("reason", "")
+        return f"{e.get('tool')}({args}) → {e.get('status')} {result}"
+    if kind == "format_retry":
+        return f"{e.get('label')}: {e.get('error', '')[:80]}"
+    if kind == "memory_search":
+        return f"похожих: {e.get('hits')} {' '.join(e.get('ids') or [])}"
+    if kind == "approval":
+        return e.get("decision", "")
+    if kind == "run_start":
+        return f"{e.get('model')}: {e.get('query', '')[:60]}"
+    if kind == "run_end":
+        return (f"{e.get('route')} → {e.get('outcome')}; модель {e.get('llm_calls')}, "
+                f"инструменты {e.get('tool_calls')}")
+    return ""
+
+
+@metrics_app.command("show")
+def metrics_show() -> None:
+    """Напечатать метрики в формате Prometheus — то же, что отдаёт /metrics."""
+    from prometheus_client import CollectorRegistry, generate_latest
+
+    from k8s_incident_agent.metrics import TraceCollector
+
+    registry = CollectorRegistry()
+    registry.register(TraceCollector(_traces_dir()))
+    print(generate_latest(registry).decode(), end="")
+
+
+@metrics_app.command("serve")
+def metrics_serve(
+    port: int = typer.Option(9108, "--port", help="порт /metrics"),
+    host: str = typer.Option("127.0.0.1", "--host", help="адрес; 0.0.0.0 — для docker"),
+) -> None:
+    """HTTP /metrics для Prometheus; каждый скрейп заново считает метрики из data/traces."""
+    from prometheus_client import CollectorRegistry, start_http_server
+
+    from k8s_incident_agent.metrics import TraceCollector
+
+    registry = CollectorRegistry()
+    registry.register(TraceCollector(_traces_dir()))
+    start_http_server(port, addr=host, registry=registry)
+    console.print(f"/metrics на http://{host}:{port}/metrics, трейсы: {_traces_dir()}")
+    while True:
+        time.sleep(3600)
 
 
 if __name__ == "__main__":  # pragma: no cover

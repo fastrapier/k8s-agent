@@ -44,6 +44,7 @@ from k8s_incident_agent.schemas import (
 )
 from k8s_incident_agent.text import truncate
 from k8s_incident_agent.tools import READONLY_TOOLS
+from k8s_incident_agent.trace import NULL_TRACER, Tracer
 
 # --- Промпты (SOUL и скиллы подключаются на М5) --------------------------------------------
 
@@ -146,7 +147,7 @@ class Agent:
     def __init__(self, llm: LLMClient, config: AppConfig | None = None,
                  tools: dict[str, Tool] | None = None,
                  apply_patch: Callable[..., dict] | None = None,
-                 memory: MemoryStore | None = None) -> None:
+                 memory: MemoryStore | None = None, tracer: Tracer | None = None) -> None:
         self.llm = llm
         self.config = config or get_config()
         # Диагносту видны только read-only инструменты: k8s_patch здесь нет (ISOLATION L3, §10 №2).
@@ -160,6 +161,7 @@ class Agent:
         self.store = EvidenceStore()   # агент создаётся на один инцидент
         # Долгосрочная память — файл; CLI передаёт data/memory.sqlite, по умолчанию пустая в ОЗУ.
         self.memory = memory if memory is not None else MemoryStore()
+        self.tracer = tracer or NULL_TRACER   # трейс прогона (N5); в тестах — пустышка
 
     # --- служебное ---
 
@@ -282,24 +284,39 @@ class Agent:
 
     def _run_tool(self, call: dict, store: EvidenceStore, new_evidence: list,
                   allowed: bool) -> str:
-        """Выполнить вызов модели; вернуть текст для модели (результат или отказ)."""
+        """Выполнить вызов модели; вернуть текст для модели (результат или отказ).
+        Каждая попытка — событие `tool` в трейсе; отказ кодом — status=denied (на нём алерт
+        AgentUnapprovedMutation: попытка k8s_patch у диагноста — событие безопасности)."""
         function = call.get("function") or {}
         name = function.get("name") or ""
+        started = time.monotonic()
+        args: dict = {}
+        denied = None
         if name not in self.tools:
-            return f"ошибка: инструмент {name} не зарегистрирован у диагноста"
-        if not allowed:
-            return "ошибка: бюджет вызовов инструментов исчерпан"
-        try:
-            args = json.loads(function.get("arguments") or "{}")
-            READONLY_TOOLS[name].args_model.model_validate(args)
-        except (json.JSONDecodeError, ValidationError) as exc:
-            return f"ошибка: аргументы не по схеме {name}: {str(exc).splitlines()[0]}"
-        # Тихий namespace по умолчанию — ловушка: живой прогон получил 11 раз «подов 0» из
-        # default вместо payments. Агент называет namespace явно (кроме кластерной Node).
-        if ("namespace" in READONLY_TOOLS[name].args_model.model_fields
-                and not args.get("namespace") and str(args.get("kind", "")).lower() != "node"):
-            return f"ошибка: укажи namespace явно в аргументах {name}"
+            denied = f"инструмент {name} не зарегистрирован у диагноста"
+        elif not allowed:
+            denied = "бюджет вызовов инструментов исчерпан"
+        else:
+            try:
+                args = json.loads(function.get("arguments") or "{}")
+                READONLY_TOOLS[name].args_model.model_validate(args)
+            except (json.JSONDecodeError, ValidationError) as exc:
+                denied = f"аргументы не по схеме {name}: {str(exc).splitlines()[0]}"
+            # Тихий namespace по умолчанию — ловушка: живой прогон получил 11 раз «подов 0» из
+            # default вместо payments. Агент называет namespace явно (кроме кластерной Node).
+            else:
+                if ("namespace" in READONLY_TOOLS[name].args_model.model_fields
+                        and not args.get("namespace")
+                        and str(args.get("kind", "")).lower() != "node"):
+                    denied = f"укажи namespace явно в аргументах {name}"
+        if denied:
+            self.tracer.emit("tool", tool=name, args=args, status="denied", reason=denied,
+                             seconds=0.0)
+            return f"ошибка: {denied}"
         result = self.tools[name](**args, store=store, config=self.config)
+        self.tracer.emit("tool", tool=name, args=args, status=result.status,
+                         evidence_id=result.evidence_id, truncated=result.truncated,
+                         seconds=round(time.monotonic() - started, 3))
         evidence = store.get(result.evidence_id)
         if evidence is not None:
             new_evidence.append(evidence.model_dump())
@@ -316,6 +333,7 @@ class Agent:
         суждение «тот же класс / чем отличается» — моделью в том же вызове."""
         usage = Usage()
         past = {p.id: p for p in self.memory.search(state["query"], self._namespace(state))}
+        self.tracer.emit("memory_search", hits=len(past), ids=list(past))
         content = (f"Запрос: {state['query']}\n\nСвидетельства:\n"
                    f"{self._evidence_text(state, detail=True)}")
         if past:
@@ -526,22 +544,27 @@ def _similar_lines(state: IncidentState) -> list[str]:
 def build_graph(agent: Agent) -> StateGraph:
     graph = StateGraph(IncidentState)
     g = agent.guarded
-    graph.add_node("classify", g("classify", agent.classify, lambda s: {"route": "failed"}))
-    graph.add_node("refuse", agent.refuse)
-    graph.add_node("runbook", g("runbook", agent.runbook,
+
+    def add(name: str, fn: Callable) -> None:
+        # Каждый узел — с замером для трейса: из длительностей узлов складывается время прогона.
+        graph.add_node(name, agent.tracer.node_wrapper(name, fn))
+
+    add("classify", g("classify", agent.classify, lambda s: {"route": "failed"}))
+    add("refuse", agent.refuse)
+    add("runbook", g("runbook", agent.runbook,
                                 lambda s: {"report": "Модель не ответила, попробуйте позже."}))
-    graph.add_node("plan", g("plan", agent.plan, lambda s: {"plan": []}))
-    graph.add_node("diagnose", agent.diagnose)
-    graph.add_node("analyze", g("analyze", agent.analyze, lambda s: {"hypotheses": []}))
-    graph.add_node("review", g("review", agent.review, lambda s: {
+    add("plan", g("plan", agent.plan, lambda s: {"plan": []}))
+    add("diagnose", agent.diagnose)
+    add("analyze", g("analyze", agent.analyze, lambda s: {"hypotheses": []}))
+    add("review", g("review", agent.review, lambda s: {
         "review_verdict": "unreviewed", "gaps": [],
         "review_iterations": s.get("review_iterations", 0) + 1}))
-    graph.add_node("propose", g("propose", agent.propose, lambda s: {
+    add("propose", g("propose", agent.propose, lambda s: {
         "proposed_patch": None, "recommendation": "Модель не дала предложение по исправлению."}))
-    graph.add_node("approval", agent.approval)
-    graph.add_node("execute", agent.execute)
-    graph.add_node("remember", agent.remember)
-    graph.add_node("report", agent.report)
+    add("approval", agent.approval)
+    add("execute", agent.execute)
+    add("remember", agent.remember)
+    add("report", agent.report)
 
     graph.add_edge(START, "classify")
     graph.add_conditional_edges("classify", lambda s: {

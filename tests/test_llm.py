@@ -8,6 +8,7 @@ import pytest
 
 from k8s_incident_agent.llm import LLMClient, LLMError, Usage
 from k8s_incident_agent.schemas import PatchProposal, Route
+from k8s_incident_agent.trace import NULL_TRACER
 
 
 class Scripted(LLMClient):
@@ -15,8 +16,9 @@ class Scripted(LLMClient):
 
     def __init__(self, replies):
         self.replies, self.requests = list(replies), []
+        self.model, self.tracer = "test-model", NULL_TRACER
 
-    def raw(self, messages, tools=None, response_format=None, model=None):
+    def raw(self, messages, tools=None, response_format=None, model=None, label=""):
         self.requests.append({"messages": list(messages), "response_format": response_format})
         return {"message": {"content": self.replies.pop(0)}, "latency": 0.1, "cost": 0.0}
 
