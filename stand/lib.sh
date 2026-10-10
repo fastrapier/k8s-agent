@@ -65,14 +65,18 @@ namespace_exists() {
 AGENT_KUBE_DIR="$(cd "$STAND_DIR/.." && pwd)/.kube"
 RO_KUBECONFIG="$AGENT_KUBE_DIR/agent-ro.kubeconfig"
 RW_KUBECONFIG="$AGENT_KUBE_DIR/agent-rw.kubeconfig"
+# Для контейнера агента (docker-compose.yml): тот же токен диагноста, но API-сервер по имени
+# ноды kind в docker-сети — 127.0.0.1 изнутри контейнера указывает на сам контейнер.
+RO_CONTAINER_KUBECONFIG="$AGENT_KUBE_DIR/agent-ro.container.kubeconfig"
+CONTAINER_API_SERVER="https://${CLUSTER_NAME}-control-plane:6443"
 
 # kubeconfig для ServiceAccount агента: тот же API-сервер и CA, что у админского контекста,
 # но вместо сертификата администратора — токен учётки. Токен выпускается через TokenRequest
 # на сутки: украденный файл завтра бесполезен, а ./up.sh выпускает новый.
-# Использование: write_agent_kubeconfig <serviceaccount> <файл>
+# Использование: write_agent_kubeconfig <serviceaccount> <файл> [адрес API-сервера]
 write_agent_kubeconfig() {
-  local sa="$1" out="$2" server ca token
-  server="$(kc config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')"
+  local sa="$1" out="$2" server="${3:-}" ca token
+  [ -n "$server" ] || server="$(kc config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')"
   ca="$(kc config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')"
   token="$(kc create token "$sa" -n agent-system --duration=24h)"
   mkdir -p "$(dirname "$out")" && chmod 700 "$(dirname "$out")"

@@ -7,7 +7,7 @@ export PATH := $(HOME)/.local/bin:$(PATH)
 .DEFAULT_GOAL := help
 .PHONY: help install lock test lint lint-fix config-show tool \
         stand-up stand-break stand-status stand-clean stand-down stand demo-s1 \
-        isolation-test check
+        isolation-test agent-build agent-tool check
 
 help:  ## список целей
 	@grep -hE '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -69,5 +69,12 @@ demo-s1:  ## приёмка М1/М2: api в CrashLoopBackOff, Secret защищ�
 
 isolation-test:  ## приёмка М2: проверки изоляции из docs/ISOLATION.md §10
 	./stand/isolation-test.sh
+
+agent-build:  ## собрать образ агента (Dockerfile)
+	docker compose build agent
+
+agent-tool:  ## инструмент из контейнера агента: make agent-tool TOOL=k8s_list_pods ARGS="--ns payments"
+	@test -f .kube/agent-ro.container.kubeconfig || { echo "нет kubeconfig контейнера: make stand-up"; exit 1; }
+	docker compose run --rm agent tool $(TOOL) $(ARGS)
 
 check: lint test  ## всё, что гоняется без кластера

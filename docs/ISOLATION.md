@@ -2,9 +2,10 @@
 
 Версия 0.1, 2026-09-28. Раскрывает раздел 9 и требования N1–N2 `docs/TZ.md`.
 
-> **Статус на 2026-10-09:** маскирование Secret (раздел 6) и RBAC с двумя ServiceAccount
-> (раздел 5) реализованы и проверяются `make isolation-test` на живом kind и в CI. Dockerfile,
-> compose и egress-контур (разделы 3–4) пока остаются проектными решениями следующих кусков М2.
+> **Статус на 2026-10-10:** реализованы и проверяются `make isolation-test` на живом kind и в CI:
+> маскирование Secret (раздел 6), RBAC с двумя ServiceAccount (раздел 5), контейнер агента
+> (раздел 4). Egress-контур (раздел 3) — следующий кусок М2: пока контейнер в сети `kind`
+> имеет выход наружу.
 
 ## 1. Модель угроз
 
@@ -53,52 +54,46 @@
 
 ## 4. L1: контейнер
 
-```dockerfile
-FROM python:3.12-slim AS base
-RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin agent
-WORKDIR /app
-COPY --chown=agent:agent . .
-USER 10001
-ENTRYPOINT ["python", "-m", "agent.cli"]
-```
+Файлы — `Dockerfile`, `docker-compose.yml`, `.dockerignore` в корне репозитория. Суть:
 
-```yaml
-# docker-compose.yml (фрагмент)
-services:
-  agent:
-    build: .
-    user: "10001:10001"
-    read_only: true
-    cap_drop: ["ALL"]
-    security_opt:
-      - no-new-privileges:true
-      - seccomp:./security/seccomp.json
-    pids_limit: 256
-    mem_limit: 2g
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,size=64m
-    volumes:
-      - ./data:/data:rw          # SQLite: чекпоинты и инциденты
-      - ./agent:/app/agent:ro    # SOUL, runbooks
-      - ./skills:/app/skills:ro
-      - ./kubeconfig-ro:/secrets/kubeconfig-ro:ro
-    env_file: [local.env]
-    networks: [egress]
-```
+| Где | Что | Зачем |
+|---|---|---|
+| `Dockerfile` | две стадии: uv собирает окружение по `uv.lock`, в итоговый образ попадают только `.venv` и `config.yaml` | в рантайме нет uv, исходников и кешей; базовые образы прибиты дайджестом (N6) |
+| `Dockerfile` | `USER 10001`, без домашнего каталога и shell для входа | процесс не root |
+| `.dockerignore` | allow-list: `pyproject.toml`, `uv.lock`, `src/`, `config.yaml` | `local.env` с токеном и `.kube/` с токенами учёток даже не отправляются демону Docker |
+| `docker-compose.yml` | `user: 10001`, `read_only`, `cap_drop: [ALL]`, `no-new-privileges`, `pids_limit`, `mem_limit`, `tmpfs /tmp` | см. обоснование ниже |
+| `docker-compose.yml` | один том: kubeconfig диагноста, только чтение | контейнер получает ровно одну учётку — `incident-agent-ro` |
+
+Адрес API-сервера в kubeconfig контейнера — `https://k8s-incident-agent-control-plane:6443`, имя ноды
+kind в docker-сети `kind` (это имя есть в SAN сертификата API-сервера, TLS проверяется). Адрес хоста
+`127.0.0.1` изнутри контейнера указывал бы на сам контейнер.
+
+Тома под SQLite (`/data`, М6), скиллы и семантические файлы (М5) и `env_file` с токеном шлюза (когда
+агент начнёт ходить в LLM, М4) добавляются вместе с кодом, которому они нужны, — не раньше.
+
+**seccomp — профиль Docker по умолчанию**, а не свой `seccomp.json` из черновика этого раздела.
+Профиль по умолчанию уже запрещает десятки опасных системных вызовов (`mount`, `reboot`, `kexec_load`,
+`ptrace` и др.) и применяется ко всем контейнерам без настройки. Свой профиль пришлось бы
+сопровождать при каждом обновлении Python и зависимостей, а выигрыш для read-only агента без
+capabilities — минимальный.
 
 Обоснование каждого пункта:
 
-- `read_only: true` — агент не должен уметь дописывать себе код; всё изменяемое вынесено в `/data` и `/tmp`;
-- `tmpfs` с `noexec` — модель кэшируется в образ на этапе сборки, исполняемого кода в рантайме не появляется;
+- `user: 10001` — дублирует `USER` из образа: если его потеряют при правке Dockerfile, контейнер всё равно не root;
+- `read_only: true` — агент не должен уметь дописывать себе код; всё изменяемое — в `/tmp` (и `/data` с М6);
+- `tmpfs` на `/tmp` — единственное место для записи, 64 МБ. `nosuid,nodev,noexec` Docker ставит на tmpfs сам.
+  `noexec` не даёт запустить скачанный бинарник напрямую, но интерпретатор (`python /tmp/x.py`) это не
+  останавливает — поэтому от выноса данных защищает не он, а сеть (раздел 3);
 - `cap_drop: ALL` — ни одна capability не нужна: нет bind на привилегированные порты, нет ptrace, нет mount;
 - `no-new-privileges` — закрывает setuid-эскалацию;
 - `pids_limit` / `mem_limit` — локализуют зацикливание и утечку памяти;
 - **нет** `/var/run/docker.sock` — его проброс обнулил бы весь L1.
 
-Численные лимиты (`256` процессов, `2g` памяти, `64m` tmpfs) — стартовые значения: 2 ГБ рассчитаны
-на bge-m3 на CPU плюс буфер свидетельств, остальные взяты с большим запасом. Уточняются по профилю
-первых реальных прогонов; признак, что лимит подобран неверно, — OOM-kill контейнера или упор в
-`pids_limit` при нормальной работе.
+Численные лимиты (`256` процессов, `512m` памяти, `64m` tmpfs) — от замера: пиковая память агента
+на вызове инструмента — около 90 МиБ. На М6 добавятся локальные эмбеддинги bge-m3 (~2 ГБ весов) —
+лимит и способ доставки весов (образ или read-only том: rootfs только для чтения, кеш HuggingFace
+в рантайме не запишется) пересматриваются тогда. Признак, что лимит подобран неверно, — OOM-kill
+контейнера или упор в `pids_limit` при нормальной работе.
 
 ## 5. L2: RBAC — два ServiceAccount
 
@@ -220,7 +215,12 @@ namespace входит в список разрешённых, и — главн
    **Частично реализовано: `make isolation-test`** проверяет оба рубежа на выводе инструментов
    (под учёткой диагноста — отказ RBAC, под админом — `***masked***`). Трейс и SQLite появятся
    на М6–М7;
-4. `docker exec` в контейнер: `id` → 10001, запись в `/app` → `Read-only file system`;
+4. контейнер агента: `id -u` → 10001; запись в `/var/tmp` → `Read-only file system`; `CapBnd`
+   нулевой; `NoNewPrivs: 1`; `Seccomp: 2`; смонтированы ровно kubeconfig диагноста (ro) и `/tmp` —
+   ни `docker.sock` по какому-либо пути, ни лишних томов; инструмент из контейнера работает под
+   учёткой диагноста. **Реализовано: `make isolation-test`.** Запись проверяется в `/var/tmp`, а не в
+   `/app`: `/app` принадлежит root, и отказ там не доказал бы read-only rootfs. Capabilities — по
+   `CapBnd`: у не-root процесса `CapEff` нулевой и без `cap_drop`;
 5. `curl https://example.com` из контейнера → отказ прокси;
 6. патч, трогающий путь вне белого списка (например, `spec.template.spec.hostPID`) → отклонён кодом;
 7. eval-прогон всех кейсов: ноль вызовов мутирующих инструментов при `approval_status != approved`.

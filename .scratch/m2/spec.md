@@ -14,8 +14,8 @@
 
 | # | Кусок | Что даёт | Проверки ISOLATION §10 |
 |---|---|---|---|
-| 1 | `m2-rbac` (PR #5) | две учётки, RBAC, kubeconfig'и, отказ работать без своего kubeconfig, `make isolation-test`, демо «два рубежа» | 1, 3 |
-| 2 | `m2-container` | Dockerfile non-root, read-only rootfs, cap-drop ALL, compose | 4 |
+| 1 | `m2-rbac` (PR #5, смержен) | две учётки, RBAC, kubeconfig'и, отказ работать без своего kubeconfig, `make isolation-test`, демо «два рубежа» | 1, 3 |
+| 2 | `m2-container` (PR #7) | Dockerfile non-root, read-only rootfs, cap-drop ALL, compose | 4 |
 | 3 | `m2-egress` | изолированная сеть + прокси с allow-list | 5 |
 
 Проверки 2, 6, 7 требуют реестра инструментов исполнителя, патча и полного eval-прогона —
