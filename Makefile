@@ -8,7 +8,7 @@ export PATH := $(HOME)/.local/bin:$(PATH)
 .PHONY: help install lock test lint lint-fix config-show tool \
         stand-up stand-break stand-status stand-clean stand-down stand demo-secrets \
         demo-s1 demo-s1-container demo-s5 demo-s6 memory-list \
-        isolation-test agent-build agent-tool eval-models check
+        isolation-test agent-build agent-tool eval-models alerts-check obs-up obs-down metrics check
 
 help:  ## список целей
 	@grep -hE '^[a-z0-9-]+:.*?##' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -99,11 +99,31 @@ isolation-test:  ## приёмка М2: проверки изоляции из d
 eval-models:  ## М3: сравнение моделей; MODELS=a,b RUNS=3 (по умолчанию 4 кандидата × 3 прогона)
 	uv run python evals/model_selection.py $(if $(MODELS),--models $(MODELS)) $(if $(RUNS),--runs $(RUNS))
 
+
 agent-build:  ## собрать образ агента (Dockerfile)
 	docker compose build agent
 
 agent-tool:  ## инструмент из контейнера агента: make agent-tool TOOL=k8s_list_pods ARGS="--ns payments"
 	@test -f .kube/agent-ro.container.kubeconfig || { echo "нет kubeconfig контейнера: make stand-up"; exit 1; }
 	docker compose run --rm agent tool $(TOOL) $(ARGS)
+
+# --- М7: наблюдаемость ------------------------------------------------------
+
+alerts-check:  ## проверить правила, юнит-тесты promtool и конфигурацию Alertmanager
+	docker run --rm -v "$(CURDIR)/observability:/etc/prometheus:ro" -w /etc/prometheus \
+		--entrypoint promtool prom/prometheus:v3.7.3 check rules alerts.yml
+	docker run --rm -v "$(CURDIR)/observability:/etc/prometheus:ro" -w /etc/prometheus \
+		--entrypoint promtool prom/prometheus:v3.7.3 test rules alerts.test.yml
+	docker run --rm -v "$(CURDIR)/observability:/etc/alertmanager:ro" \
+		--entrypoint amtool prom/alertmanager:v0.29.0 check-config /etc/alertmanager/alertmanager.yml
+
+obs-up:  ## поднять Prometheus, Alertmanager и Grafana (http://127.0.0.1:3000)
+	docker compose -f observability/docker-compose.yml up -d
+
+obs-down:  ## остановить стек наблюдаемости
+	docker compose -f observability/docker-compose.yml down
+
+metrics:  ## /metrics агента на :9108 — метрики из трейсов data/traces
+	uv run k8s-agent metrics serve --port 9108
 
 check: lint test  ## всё, что гоняется без кластера

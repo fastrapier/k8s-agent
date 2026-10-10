@@ -1,0 +1,65 @@
+groups:
+  - name: k8s-incident-agent
+    rules:
+      # OBSERVABILITY §5: нулевая терпимость к мутациям без подтверждения.
+      - alert: AgentUnapprovedMutation
+        expr: increase(agent_tool_calls_total{tool=~"k8s_patch|k8s_rollout_restart",status="denied"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "заблокирована попытка мутации без подтверждения"
+
+      # OBSERVABILITY §5 и config.yaml budget.max_seconds: p95 не выше 180 секунд.
+      - alert: AgentLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(agent_run_duration_seconds_bucket[30m]))) > 180
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 длительности прогона выше бюджета 180 секунд"
+
+      # OBSERVABILITY §5: стартовый порог стоимости хвоста — $0.50.
+      - alert: AgentRunCostHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(agent_run_cost_usd_bucket[1h]))) > 0.5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 стоимости прогона выше 0.50 доллара"
+
+      # OBSERVABILITY §5: стартовый порог доли ошибок инструментов — 20%.
+      - alert: AgentToolErrorRate
+        expr: sum(rate(agent_tool_calls_total{status="error"}[15m])) / clamp_min(sum(rate(agent_tool_calls_total[15m])), 1e-9) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "доля ошибок инструментов выше 20 процентов"
+
+      # OBSERVABILITY §5: менее половины прогонов должны укладываться в одну итерацию ревью.
+      - alert: AgentReviewLooping
+        expr: (sum(increase(agent_review_iterations_bucket{le="1"}[30m])) / clamp_min(sum(increase(agent_review_iterations_count[30m])), 1)) < 0.5 and sum(increase(agent_review_iterations_count[30m])) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "меньше половины прогонов укладывается в одну итерацию ревью"
+
+      # OBSERVABILITY §5: стартовый порог исходов budget_exceeded — 15%.
+      - alert: AgentBudgetExceeded
+        expr: sum(increase(agent_runs_total{outcome="budget_exceeded"}[1h])) / clamp_min(sum(increase(agent_runs_total[1h])), 1) > 0.15
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "доля прогонов, превысивших бюджет, выше 15 процентов"
+
+      # OBSERVABILITY §5: более 0.5 повтора structured output в минуту на модель.
+      - alert: AgentFormatInstability
+        expr: sum by (model) (rate(agent_structured_output_retries_total[15m])) * 60 > 0.5
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: "модель слишком часто повторяет structured output"
