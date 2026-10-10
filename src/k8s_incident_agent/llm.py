@@ -64,10 +64,10 @@ class LLMClient:
 
     def raw(self, messages: list, tools: list | None = None,
             response_format: dict | None = None, model: str | None = None,
-            label: str = "") -> dict:
+            label: str = "", timeout: float = TIMEOUT) -> dict:
         """Один вызов. Таймаут и ошибка — не исключение, а {'timeout'|'error', latency, cost}.
         Каждый вызов — событие `llm` в трейсе: латентность, цена, токены, промпт и ответ."""
-        reply = self._call(messages, tools, response_format, model)
+        reply = self._call(messages, tools, response_format, model, timeout)
         self.tracer.emit(
             "llm", model=model or self.model, label=label or ("tools" if tools else "chat"),
             status="ok" if "message" in reply else ("timeout" if reply.get("timeout") else "error"),
@@ -77,7 +77,7 @@ class LLMClient:
         return reply
 
     def _call(self, messages: list, tools: list | None, response_format: dict | None,
-              model: str | None) -> dict:
+              model: str | None, timeout: float = TIMEOUT) -> dict:
         body: dict[str, Any] = {"model": model or self.model, "messages": messages,
                                 "temperature": self.temperature, "top_p": 1}
         if self.reasoning_effort:
@@ -91,7 +91,7 @@ class LLMClient:
             started = time.monotonic()
             try:
                 request = urllib.request.Request(self.url, data, self.headers)
-                with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
                     payload = json.load(response)
                 usage = payload.get("usage") or {}
                 return {
@@ -102,13 +102,13 @@ class LLMClient:
                     "tokens_out": usage.get("completion_tokens") or 0,
                 }
             except TimeoutError:
-                return {"timeout": True, "latency": float(TIMEOUT), "cost": 0.0}
+                return {"timeout": True, "latency": float(timeout), "cost": 0.0}
             except urllib.error.HTTPError as exc:
                 if exc.code not in (429, 500, 502, 503, 504) or attempt == GATEWAY_RETRIES:
                     return {"error": f"HTTP {exc.code}", "latency": 0.0, "cost": 0.0}
             except urllib.error.URLError as exc:
                 if isinstance(exc.reason, TimeoutError | socket.timeout):
-                    return {"timeout": True, "latency": float(TIMEOUT), "cost": 0.0}
+                    return {"timeout": True, "latency": float(timeout), "cost": 0.0}
                 if attempt == GATEWAY_RETRIES:
                     return {"error": str(exc.reason), "latency": 0.0, "cost": 0.0}
             time.sleep(2 ** attempt)
@@ -123,7 +123,8 @@ class LLMClient:
         return reply["message"]
 
     def structured(self, messages: list, schema: type[BaseModel], usage: Usage,
-                   free_form: bool = False) -> BaseModel:
+                   free_form: bool = False, timeout: float = TIMEOUT,
+                   timeout_retries: int = 0) -> BaseModel:
         """Ответ строго по pydantic-схеме; невалидный — повтор с текстом ошибки (ARCH §8).
 
         free_form — для схем с открытым объектом (патч `dict[str, Any]`). Декодирование по
@@ -140,9 +141,15 @@ class LLMClient:
             response_format = {"type": "json_schema", "json_schema": {
                 "name": schema.__name__, "schema": schema.model_json_schema()}}
         error = ""
-        for _ in range(FORMAT_RETRIES + 1):
-            reply = self.raw(messages, response_format=response_format, label=schema.__name__)
+        attempt = 0
+        while attempt <= FORMAT_RETRIES:
+            reply = self.raw(messages, response_format=response_format, label=schema.__name__,
+                             timeout=timeout)
             usage.add(reply)
+            if reply.get("timeout") and timeout_retries > 0:
+                timeout_retries -= 1      # зависшее декодирование случайно — повтор обычно проходит
+                continue
+            attempt += 1
             if "message" not in reply:
                 raise LLMError(reply.get("error") or "таймаут шлюза")
             try:

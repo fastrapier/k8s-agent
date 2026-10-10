@@ -96,8 +96,10 @@ class Hypotheses(Strict):
     """Ответ аналитика (F4): гипотезы, каждая со ссылками на свидетельства."""
 
     hypotheses: list[Hypothesis] = Field(min_length=1, max_length=3)
+    # Обязательное поле: необязательное модель иногда опускала, и найденный в памяти случай не
+    # попадал в отчёт (репетиция демо). Нет прошлых инцидентов — пустой список.
     similar: list[SimilarIncident] = Field(
-        default_factory=list, description="оценка каждого прошлого инцидента из памяти, если даны")
+        description="оценка каждого прошлого инцидента из памяти; если их не дали — []")
 
 
 class PatchProposal(Strict):

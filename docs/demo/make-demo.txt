@@ -1,0 +1,366 @@
+
+== 1/6 Стенд: четыре поломки внесены
+  [ сломано как надо ] S1 CrashLoopBackOff: под api, restartCount=2
+  [ сломано как надо ] S2 502 после релиза: подов Ready=2, endpoints сервиса web=0
+  [ сломано как надо ] S3 не раскатывается: Pending=2 из 5 подов
+  [ сломано как надо ] S4 Job не завершается: есть работающий init-контейнер (startedAt: 2026-10-10T17:46:05Z)
+
+== 2/6 S6: запрос вне области — отказ без единого вызова инструментов
+инцидент 51801963, модель z-ai/glm-5.3
+ classify маршрут: out_of_scope
+
+Я помогаю диагностировать инциденты в Kubernetes: собираю факты в кластере, нахожу причину и предлагаю исправление, которое применяется только после вашего
+подтверждения. С этим запросом помочь не могу. Опишите, что происходит в кластере, — например: «под api в namespace payments в CrashLoopBackOff».
+трейс: k8s-agent trace 51801963
+
+== 3/6 S1: жалоба → скилл → свидетельства → патч → ваше подтверждение
+инцидент 02797bcd, модель z-ai/glm-5.3
+ classify маршрут: diagnose
+     plan скилл crashloop-diagnosis; план: Зафиксировать состояние пода: READY, STATUS, restart count; Получить exit code, reason (OOMKilled/Error), условия
+пода; Прочитать лог предыдущего запуска — причина падения; Подтвердить probes, image pull, убийство контейнера событиями; Проверить манифест владельца
+(Deployment без хеша RS): env, probes, ресурсы
+Скилл crashloop-diagnosis — Применяй при повторных рестартах контейнера и статусе CrashLoopBackOff.
+
+  1 Зафиксируй namespace и имя пода; не переноси вывод из другого namespace.
+  2 Вызови k8s_list_pods(namespace="<ns>", selector="<app=...>"); проверь READY, STATUS и restart count.
+  3 Вызови k8s_describe(kind="Pod", name="<pod>", namespace="<ns>") для exit code, reason и условий.
+  4 Вызови k8s_logs(pod="<pod>", namespace="<ns>", previous=true, tail=200) — лог ПРЕДЫДУЩЕГО запуска.
+  5 Затем вызови k8s_logs(pod="<pod>", namespace="<ns>", previous=false, tail=100) для текущего старта.
+  6 Вызови k8s_events(namespace="<ns>", object="<pod>"); события подтверждают probes, image pull и убийство контейнера.
+  7 Вызови k8s_get_manifest(kind="Deployment", name="<owner>", namespace="<ns>"); имя владельца — без хеша ReplicaSet (api, не api-86d9b8c4bd).
+  8 Если владелец StatefulSet, запроси k8s_get_manifest(kind="StatefulSet", name="<owner>", namespace="<ns>").
+  9 Secret читать нельзя: RBAC запрещает его получение, значение не запрашивай и не угадывай.
+ 10 Лог «переменная не задана», а в env её нет? Найди в k8s_list_pods здоровый (Running) Deployment того же namespace и прочитай его манифест: там видно, из
+    какого Secret и под каким key эта переменная берётся. Без этого шага патч не составить.
+ 11 Если здорового аналога нет, ищи имя Secret и key в соседних env того же манифеста (valueFrom.secretKeyRef).
+ 12 Лог environment variable ... is not set и отсутствующий secretKeyRef подтверждают потерю конфигурации.
+ 13 OOMKilled подтверждается reason/exit code и метриками; probe failure — Events и полями liveness/readiness.
+ 14 Ошибка образа подтверждается ErrImagePull/ImagePullBackOff; образ не меняй, только рекомендуй проверку поставки.
+ 15 Типичный корень — ошибка env, команда запуска, probe или лимит ресурса; поле-улика находится в status, events или template.
+ 16 Для исправления предложи JSON merge patch только для spec.template.spec.containers[*].env или resources.
+ 17 Допустимы также spec.replicas, spec.template.metadata.annotations и ConfigMap.data; только Deployment/StatefulSet/ConfigMap.
+ 18 Патч не меняет image, volumes, securityContext и RBAC; применять его можно лишь после подтверждения человека.
+ 19 Покажи diff и ожидаемый эффект, затем после одобрения проверь rollout и новые логи.
+ 20 Остановись при недостатке свидетельств, запрете RBAC, неоднозначном владельце или исчезновении симптома.
+ diagnose свидетельства: ev-001, ev-002, ev-003, ev-004, ev-005, ev-006, ev-007, ev-008 (вызовов инструментов всего: 8)
+  analyze гипотез: 3
+   review ревью: ok (итерация 1)
+  propose патч: Deployment/api
+
+Предлагается патч Deployment/api в payments
+{
+  "spec": {
+    "template": {
+      "spec": {
+        "containers": [
+          {
+            "name": "api",
+            "env": [
+              {
+                "name": "DB_PASSWORD",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "password",
+                    "name": "payments-db"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
+Почему: Контейнер api завершается с exit 1, так как переменная DB_PASSWORD не задана (ev-003, ev-004), а в манифесте Deployment api объявлены только DB_HOST,
+DB_NAME и DB_USER (ev-005). Соседний Deployment checkout в том же namespace payments успешно использует DB_PASSWORD через secretKeyRef payments-db/password
+(ev-008) и работает (ev-007), что подтверждает существование ключа password в Secret payments-db. Добавление этой переменной устраняет причину CrashLoopBackOff.
+(свидетельства: ev-003, ev-005, ev-007, ev-008)
+Примените патч к Deployment api в namespace payments — он добавит переменную DB_PASSWORD через существующий Secret payments-db (ключ password), как в работающем
+checkout. После применения проверьте состояние подов и логи api: под должен перейти в Running и вывести '\[api] connected, listening on :8080'.
+ответить позже: k8s-agent run --thread 02797bcd
+Применить патч? [y/N]:   execute исполнение: applied
+ remember записано в память: inc-2026-10-10-001
+
+                                                                       Отчёт об инциденте
+
+Симптомы
+
+Под api в namespace payments в CrashLoopBackOff, разберись
+
+Свидетельства
+
+ • ev-001 k8s_list_pods — namespace payments: подов 2, проблемных 1 (api-86d9b8c4bd-cw8sf=Error)
+ • ev-002 k8s_describe — Pod api-86d9b8c4bd-cw8sf в namespace payments: контейнеры в состоянии CrashLoopBackOff
+ • ev-003 k8s_logs — лог пода api-86d9b8c4bd-cw8sf: 3 строк; последняя: [api] FATAL: environment variable DB_PASSWORD is not set; cannot connect to database
+   payments
+ • ev-004 k8s_logs — лог пода api-86d9b8c4bd-cw8sf: 3 строк; последняя: [api] FATAL: environment variable DB_PASSWORD is not set; cannot connect to database
+   payments
+ • ev-005 k8s_get_manifest — манифест Deployment api из namespace payments
+ • ev-006 k8s_describe — ошибка: объект не найден. pods "api-579c964b65-8m772" not found
+ • ev-007 k8s_list_pods — namespace payments: подов 11, проблемных 4 (api-86d9b8c4bd-cw8sf=CrashLoopBackOff, db-migrate-wwdj4=PodInitializing,
+   reports-69595645c7-24mcn=Pending, reports-69595645c7-nmg27=Pending)
+ • ev-008 k8s_get_manifest — манифест Deployment checkout из namespace payments
+
+Скилл: crashloop-diagnosis
+
+Причина
+
+В Deployment api (namespace payments) в spec.template.spec.containers[env] отсутствует переменная DB_PASSWORD: контейнер при старте проверяет её и завершается с
+exit 1, что и даёт CrashLoopBackOff. Лог пода прямо указывает: 'FATAL: environment variable DB_PASSWORD is not set' (ev-003). Манифест Deployment api (ev-005)
+содержит только DB_HOST, DB_NAME и DB_USER (secretKeyRef payments-db/username), без DB_PASSWORD. Для сравнения, Deployment checkout (ev-008) в том же namespace
+объявляет DB_PASSWORD через secretKeyRef payments-db/password и работает (ev-007: checkout-поды Running 1/1). Это подтверждённая причина, а не гипотеза:
+недостающая переменная — дефект манифеста Deployment api, а не проблема Secret или БД. (уверенность: high; свидетельства: ev-003, ev-005, ev-008)
+
+ • альтернатива: Secret payments-db в namespace payments существует и содержит ключ password — на это косвенно указывает работающий checkout, который монтирует
+   тот же secretKeyRef (ev-008) и работает без рестартов-по-ошибке (ev-007). Значит, вероятная история дефекта: при создании Deployment api (ev-005,
+   creationTimestamp 2026-10-10T20:38:01) строка с DB_PASSWORD была пропущена при копировании конфигурации из checkout. Прямого чтения Secret не проводилось (и
+   не требуется), поэтому существование ключа password — вывод по косвенному признаку работающего checkout, а не прямое свидетельство.
+ • альтернатива: Наблюдение о 'втором поде' api-579c964b65-8m772 (ev-001, Running 1/1, restarts 0) не является частью решения: при повторном запросе этот под не
+   найден (ev-006), а полный список подов namespace payments (ev-007) показывает только один под api — api-86d9b8c4bd-cw8sf в CrashLoopBackOff. Вероятно, ev-001
+   отражал переходное состояние rolling-обновления или устаревшие данные. Это не отдельная причина инцидента, а неопределённость в свидетельствах, которую стоит
+   учитывать при интерпретации ev-001.
+
+Исправление
+
+Примените патч к Deployment api в namespace payments — он добавит переменную DB_PASSWORD через существующий Secret payments-db (ключ password), как в работающем
+checkout. После применения проверьте состояние подов и логи api: под должен перейти в Running и вывести '[api] connected, listening on :8080'.
+
+Патч Deployment/api в payments:
+
+
+ {
+   "spec": {
+     "template": {
+       "spec": {
+         "containers": [
+           {
+             "name": "api",
+             "env": [
+               {
+                 "name": "DB_PASSWORD",
+                 "valueFrom": {
+                   "secretKeyRef": {
+                     "key": "password",
+                     "name": "payments-db"
+                   }
+                 }
+               }
+             ]
+           }
+         ]
+       }
+     }
+   }
+ }
+
+
+Подтверждение: approved. Результат: applied — раскатка завершена: {'desired': 1, 'updated': 1, 'ready': 1}
+
+Похожие инциденты
+
+В памяти похожих инцидентов нет.
+
+Записано в память: inc-2026-10-10-001.
+
+Потрачено
+
+ • вызовов инструментов: 8
+ • вызовов модели: 12, стоимость $0.0490
+ • время: 36 с
+трейс: k8s-agent trace 02797bcd
+
+== 4/6 Трейс этого прогона: каждый вызов модели и инструмента
+                                                               трейс 02797bcd
+┏━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┓
+┃ t, с ┃ узел     ┃ событие       ┃ детали                                                                               ┃ с      ┃ $      ┃
+┡━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━┩
+│ 0.0  │          │ run_start     │ z-ai/glm-5.3: Под api в namespace payments в CrashLoopBackOff, разберись             │        │        │
+│ 1.1  │ classify │ llm           │ Route z-ai/glm-5.3 ok 525→68 ток.                                                    │ 1.049  │ 0.0005 │
+│ 1.1  │ classify │ node          │                                                                                      │ 1.05   │        │
+│ 5.6  │ plan     │ llm           │ Plan z-ai/glm-5.3 ok 1052→234 ток.                                                   │ 4.515  │ 0.0008 │
+│ 5.6  │ plan     │ node          │                                                                                      │ 4.53   │        │
+│ 7.3  │ diagnose │ llm           │ tools z-ai/glm-5.3 ok 2353→24 ток.                                                   │ 1.658  │ 0.0022 │
+│ 7.3  │ diagnose │ tool          │ k8s_list_pods(namespace=payments, selector=app=api) → ok ev-001                      │ 0.021  │        │
+│ 9.0  │ diagnose │ llm           │ tools z-ai/glm-5.3 ok 2703→71 ток.                                                   │ 1.671  │ 0.0029 │
+│ 9.0  │ diagnose │ tool          │ k8s_describe(namespace=payments, kind=Pod, name=api-86d9b8c4bd-cw8sf) → ok ev-002    │ 0.032  │        │
+│ 9.0  │ diagnose │ tool          │ k8s_logs(pod=api-86d9b8c4bd-cw8sf, namespace=payments) → ok ev-003                   │ 0.009  │        │
+│ 10.4 │ diagnose │ llm           │ tools z-ai/glm-5.3 ok 3885→58 ток.                                                   │ 1.417  │ 0.0045 │
+│ 10.4 │ diagnose │ tool          │ k8s_logs(namespace=payments, pod=api-86d9b8c4bd-cw8sf) → ok ev-004                   │ 0.019  │        │
+│ 10.5 │ diagnose │ tool          │ k8s_get_manifest(namespace=payments, kind=Deployment, name=api) → ok ev-005          │ 0.021  │        │
+│ 13.2 │ diagnose │ llm           │ tools z-ai/glm-5.3 ok 5035→214 ток.                                                  │ 2.782  │ 0.0057 │
+│ 13.3 │ diagnose │ tool          │ k8s_describe(namespace=payments, kind=Pod, name=api-579c964b65-8m772) → error ev-006 │ 0.017  │        │
+│ 15.2 │ diagnose │ llm           │ tools z-ai/glm-5.3 ok 5307→66 ток.                                                   │ 1.947  │ 0.0042 │
+│ 15.2 │ diagnose │ tool          │ k8s_list_pods(namespace=payments) → ok ev-007                                        │ 0.039  │        │
+│ 17.7 │ diagnose │ llm           │ tools z-ai/glm-5.3 ok 6780→160 ток.                                                  │ 2.423  │ 0.0055 │
+│ 17.7 │ diagnose │ tool          │ k8s_get_manifest(kind=Deployment, name=checkout, namespace=payments) → ok ev-008     │ 0.023  │        │
+│ 24.1 │ diagnose │ llm           │ tools z-ai/glm-5.3 ok 7933→629 ток.                                                  │ 6.41   │ 0.0080 │
+│ 24.1 │ diagnose │ node          │                                                                                      │ 18.504 │        │
+│ 24.1 │ analyze  │ memory_search │ похожих: 0                                                                           │        │        │
+│ 28.5 │ analyze  │ llm           │ Hypotheses z-ai/glm-5.3 ok 4938→714 ток.                                             │ 4.372  │ 0.0034 │
+│ 28.5 │ analyze  │ node          │                                                                                      │ 4.376  │        │
+│ 30.7 │ review   │ llm           │ ReviewVerdict z-ai/glm-5.3 ok 5552→74 ток.                                           │ 2.224  │ 0.0014 │
+│ 30.7 │ review   │ node          │                                                                                      │ 2.227  │        │
+│ 32.7 │ propose  │ llm           │ PatchProposal z-ai/glm-5.3 ok 6029→310 ток.                                          │ 1.943  │ 0.0098 │
+│ 32.7 │ propose  │ node          │                                                                                      │ 1.955  │        │
+│ 32.7 │ approval │ approval      │ approved                                                                             │ 0.0    │        │
+│ 32.7 │ approval │ node          │                                                                                      │ 0.0    │        │
+│ 35.7 │ execute  │ node          │                                                                                      │ 3.051  │        │
+│ 35.7 │ remember │ node          │                                                                                      │ 0.002  │        │
+│ 35.7 │ report   │ node          │                                                                                      │ 0.0    │        │
+│ 35.7 │          │ run_end       │ diagnose → resolved; модель 12, инструменты 8                                        │        │ 0.0490 │
+└──────┴──────────┴───────────────┴──────────────────────────────────────────────────────────────────────────────────────┴────────┴────────┘
+
+== 5/6 S5: та же поломка снова — агент находит прошлый случай в памяти
+загружено: inc-2026-09-14-001, inc-2026-09-28-001
+инцидент 226eef41, модель z-ai/glm-5.3
+ classify маршрут: diagnose
+     plan скилл crashloop-diagnosis; план: Зафиксировать состояние пода api в payments: READY, STATUS, restart count; Получить exit code, reason (OOMKilled /
+Error / probe) и условия пода; Прочитать лог предыдущего упавшего запуска — найти точную ошибку старта; Подтвердить причину убийства контейнера событиями
+(probes, image pull, OOM); Проверить манифест Deployment api: env, probes, resources — поле-улику в template; Если лог указывает на незаданную env-переменную:
+найти здоровый Running Deployment в payments и прочитать его манифест, чтобы установить источник Secret и key
+ diagnose свидетельства: ev-001, ev-002, ev-003, ev-004, ev-005, ev-006, ev-007 (вызовов инструментов всего: 7)
+  analyze гипотез: 2, похожие в памяти: inc-2026-10-10-001, inc-2026-09-14-001
+   review ревью: ok (итерация 1)
+  propose патч: Deployment/api
+
+Предлагается патч Deployment/api в payments
+{
+  "spec": {
+    "template": {
+      "spec": {
+        "containers": [
+          {
+            "name": "api",
+            "env": [
+              {
+                "name": "DB_PASSWORD",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "password",
+                    "name": "payments-db"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
+Почему: Лог контейнера (ev-004) показывает FATAL: DB_PASSWORD is not set и exit 1, а в манифесте Deployment api (ev-005) в env нет DB_PASSWORD. Соседний
+Deployment checkout (ev-007) успешно использует тот же Secret payments-db с ключом password, значит ключ существует и h2 маловероятна. Добавление переменной
+через существующий secretKeyRef устраняет причину CrashLoopBackOff. (свидетельства: ev-004, ev-005, ev-007)
+Применить патч, добавляющий env DB_PASSWORD через valueFrom.secretKeyRef на Secret payments-db (ключ password), как у checkout. После применения перепроверить
+состояние пода (логи и ready 1/1).
+ответить позже: k8s-agent run --thread 226eef41
+Применить патч? [y/N]:   execute исполнение: applied
+ remember записано в память: inc-2026-10-10-002
+
+                                                                       Отчёт об инциденте
+
+Симптомы
+
+Под api в namespace payments в CrashLoopBackOff, разберись
+
+Свидетельства
+
+ • ev-001 k8s_list_pods — namespace payments: подов 1, проблемных 1 (api-86d9b8c4bd-7l75c=Error)
+ • ev-002 k8s_describe — Pod api-86d9b8c4bd-7l75c в namespace payments: контейнеры в состоянии Error
+ • ev-003 k8s_logs — лог пода api-86d9b8c4bd-7l75c предыдущего запуска: 1 строк; последняя: unable to retrieve container logs for
+   containerd://794ae079d1341a1891dd1be02ca2fcd1174b971eb608129fa71a0411d87fec3b
+ • ev-004 k8s_logs — лог пода api-86d9b8c4bd-7l75c: 3 строк; последняя: [api] config: host=postgres.payments.svc.cluster.local db=payments user=payments_app
+ • ev-005 k8s_get_manifest — манифест Deployment api из namespace payments
+ • ev-006 k8s_list_pods — namespace payments: подов 11, проблемных 4 (api-86d9b8c4bd-7l75c=CrashLoopBackOff, db-migrate-wwdj4=PodInitializing,
+   reports-69595645c7-24mcn=Pending, reports-69595645c7-nmg27=Pending)
+ • ev-007 k8s_get_manifest — манифест Deployment checkout из namespace payments
+
+Скилл: crashloop-diagnosis
+
+Причина
+
+В Deployment api (namespace payments) в списке env отсутствует переменная DB_PASSWORD, поэтому контейнер при старте завершается с exit 1 и уходит в
+CrashLoopBackOff. (уверенность: high; свидетельства: ev-004, ev-005, ev-007)
+
+ • альтернатива: Secret payments-db не содержит ключа password, из-за чего переменная не подставляется (менее вероятно: у checkout тот же secretKeyRef
+   работает).
+
+Исправление
+
+Применить патч, добавляющий env DB_PASSWORD через valueFrom.secretKeyRef на Secret payments-db (ключ password), как у checkout. После применения перепроверить
+состояние пода (логи и ready 1/1).
+
+Патч Deployment/api в payments:
+
+
+ {
+   "spec": {
+     "template": {
+       "spec": {
+         "containers": [
+           {
+             "name": "api",
+             "env": [
+               {
+                 "name": "DB_PASSWORD",
+                 "valueFrom": {
+                   "secretKeyRef": {
+                     "key": "password",
+                     "name": "payments-db"
+                   }
+                 }
+               }
+             ]
+           }
+         ]
+       }
+     }
+   }
+ }
+
+
+Подтверждение: approved. Результат: applied — раскатка завершена: {'desired': 1, 'updated': 1, 'ready': 1}
+
+Похожие инциденты
+
+ • inc-2026-10-10-001 от 2026-10-10 — тот же класс поломки.
+    • тогда: В Deployment api (namespace payments) в spec.template.spec.containers[env] отсутствует переменная DB_PASSWORD:masked при старте проверяет её и
+      завершается с exit 1, что и даёт CrashLoopBackOff. Лог пода прямо указывает: 'FATAL: environment variable DB_PASSWORD is not set' (ev-003). Манифест
+      Deployment api (ev-005) содержит только DB_HOST, DB_NAME и DB_USER (secretKeyRef payments-db/username), без DB_PASSWORD. Для сравнения, Deployment
+      checkout (ev-008) в том же namespace объявляет DB_PASSWORD через secretKeyRef payments-db/password и работает (ev-007: checkout-поды Running 1/1). Это
+      под…
+    • помогло: Deployment/api:
+      {"spec":{"template":{"spec":{"containers":[{"env":[{"name":"DB_PASSWORD","valueFrom":{"secretKeyRef":{"key":"password","name":"payments-db"}}}],"name":"ap
+      i"}]}}}}
+    • отличие: Текущий случай совпадает по симптомам и причине; отличие только в id свидетельств (ev-003/ev-008 там против ev-004/ev-007 здесь), класс поломки
+      идентичен.
+ • inc-2026-09-14-001 от 2026-09-14 — тот же класс поломки.
+    • тогда: В релизе из манифеста Deployment api пропала переменная DB_PASSWORD; приложение при старте пишет «FATAL: environment variable DB_PASSWORD is not
+      set» и завершается с exit 1.
+    • помогло: Вернули env DB_PASSWORD через valueFrom.secretKeyRef на Secret payments-db, ключ password — так же, как у checkout. Раскатка прошла, под Running.
+    • отличие: Тот же класс: пропавшая DB_PASSWORD в Deployment api после релиза. Отличие: тогда это случилось при релизе v1.4, сейчас — при создании Deployment
+      2026-10-10T20:39 (ev-005), т.е. регрессия вернулась.
+ • inc-2026-09-28-001 от 2026-09-28 — другой случай: Тот инцидент — OOMKilled (exit 137) у checkout; здесь exit 1 с явным FATAL в логах (ev-004), причина не в
+   ресурсах.
+
+Записано в память: inc-2026-10-10-002.
+
+Потрачено
+
+ • вызовов инструментов: 7
+ • вызовов модели: 11, стоимость $0.0306
+ • время: 60 с
+трейс: k8s-agent trace 226eef41
+
+== 6/6 Метрики Prometheus, посчитанные из трейсов
+agent_runs_total{outcome="resolved",route="diagnose"} 15.0
+agent_runs_total{outcome="unresolved",route="diagnose"} 1.0
+agent_runs_total{outcome="refused",route="out_of_scope"} 9.0
+agent_approvals_total{decision="approved"} 15.0
+agent_run_duration_seconds_count{route="diagnose"} 16.0
+agent_run_duration_seconds_sum{route="diagnose"} 664.693
+agent_run_duration_seconds_count{route="out_of_scope"} 9.0
+agent_run_duration_seconds_sum{route="out_of_scope"} 13.956
+agent_run_cost_usd_sum{route="diagnose"} 0.453811
+agent_run_cost_usd_sum{route="out_of_scope"} 0.002598

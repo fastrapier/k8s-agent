@@ -1,43 +1,32 @@
 # Передача работы
 
-## ⚡ Текущее состояние: 2026-10-10, вечер. Защита — 2026-10-13. Читать это первым.
+## ⚡ Текущее состояние: 2026-10-11, ночь. Защита — 2026-10-13. Читать это первым.
 
-**Смержено в `main` (PR #1–#9):** М1 (маскирование), стенд S4/metrics-server, CI, М2 целиком (RBAC
-двух учёток, контейнер без root/capabilities, egress только через прокси — `make isolation-test` 40/40),
-М3 (сравнение 4 моделей → `z-ai/glm-5.3`, LLM_SELECTION §7–8). Пользователь разрешил мержить самому:
-мерж-коммитом, после зелёного CI.
+**Все этапы М1–М10 сделаны.** В `main` смержены М1–М7 и М9 (PR #1–#15). Открыты:
+- **PR #16 `m8-evals`** — системные evals: 18 кейсов × 3, glm-5.3 проходит все пороги (причина 42/42,
+  обоснованность 0.86, safety 0, p95 74 с, $0.021), flash — проверенный дешёвый режим ($0.0038);
+  `docs/EVALS_REPORT.md`. Мержить после зелёного CI.
+- **PR М10 `m10-demo`** (поверх #16) — `make demo`, `docs/DEMO.md`, сохранённые прогоны `docs/demo/`,
+  исправления по репетициям. После мержа #16 перецепить на main.
 
-**Открыто:**
-- **PR #10 `m4-graph` — граф агента (М4).** CI зелёный. Живой S1 прошёл на хосте и в контейнере (диагноз →
-  патч DB_PASSWORD из secretKeyRef payments-db/password → «y» → applied → раскатка завершена), S6 — отказ.
-  Ждёт ревью: Codex делает его в `.worktrees/m4-review`, итог — `.worktrees/codex-review-result.md`.
-  Разобрать находки, исправить, мержить.
-- **Ветка `m5-skills` (поверх m4-graph):** код М5 закоммичен (`knowledge.py`: SOUL/IDENTITY в промпты,
-  скилл по триггерам в узле plan, runbook_qa по оглавлению, `--show-skill`; Dockerfile копирует skills/
-  и agent/). Тексты skills/ и agent/ пишет Codex в `.worktrees/m5-content` (ветка m5-content), итог —
-  `.worktrees/codex-skills-result.md`. Дальше: перенести файлы в m5-skills, тест «S1→crashloop-diagnosis,
-  S3→pending-pod, S4→stuck-job, S2→ingress-502», живой S1 с `--show-skill`, DEFENSE/спека, PR.
-- **Flash-модели М3** прогнаны (`evals/results/eval-models-flash.log`, отчёт в последнем каталоге
-  `evals/results/model-selection/`). Дописать в LLM_SELECTION как кандидатов на дешёвые узлы.
+**Перед защитой:** `make stand-status` (все «сломано как надо»), `make check`, один `make demo`.
+Сценарий и реплики — `docs/DEMO.md`; ответы комиссии — `docs/DEFENSE.md` (начинается с таблицы
+покрытия ТЗ); решения — `docs/adr/`.
 
-**План до защиты (сначала ширина, упрощения — в DEFENSE):**
-- М6 память: SQLite + FTS5 по схеме MEMORY §3.1, `memory_writer` после отчёта (без секретов), поиск похожих
-  в analyze, раздел «Похожие инциденты» в отчёте, `make demo-s5` с фикстурой прошлого инцидента.
-  Эмбеддинги bge-m3 — упрощение (2 ГБ весов + torch против лимита контейнера 512m), записать в DEFENSE.
-- М7 наблюдаемость: JSONL-трейс каждого прогона (узлы, вызовы LLM/инструментов, цена), `/metrics` из
-  трейсов, правила алертов + promtool, дашборд Grafana JSON. Langfuse не поднимаем — расхождение в DEFENSE.
-- М8: системные evals S1–S6 на стенде (до approval, без применения), судья `sub/claude-opus-5`.
-- М9: ADR (LangGraph + свой клиент, FTS5 без векторов, egress-прокси, свой трейс), CONTEXT.md, сверка
-  ARCHITECTURE; М10: `make demo`, сценарий защиты.
+**Что можно улучшить, если останется время:** промпт аналитика без прогнозов и фактов о непрочитанных
+объектах (обоснованность S4 0.62–0.83, `docs/EVALS_REPORT.md`) — только с новым прогоном `make eval RUNS=3`.
 
-**Как работать:** спека `.scratch/<кусок>/spec.md` + PR «зачем / почему не проще / как проверено»; в
-DEFENSE — ответы на вопросы комиссии. Codex — `codex exec --sandbox workspace-write -C .worktrees/<имя>`
-в worktree без `local.env`. Перед push — grep диффа на префикс токена из `local.env`.
+**Как работать:** спека `.scratch/<кусок>/spec.md` + PR «зачем / почему не проще / как проверено»; мерж
+сам, merge-коммитом, после зелёного CI. Codex — `codex exec --sandbox workspace-write -C .worktrees/<имя>`
+без `local.env`; docker из его песочницы недоступен — проверки с docker делать самому. Перед push — grep
+диффа на префикс токена из `local.env` и на значение Secret стенда.
 
-**Ловушки окружения:** в shell `FORCE_COLOR=3` (rich красит вывод — проверки снимают его); связь с
-github.com периодически рвётся — повторять push; прежний scratchpad исчез — временное писать в
-`.worktrees/` или `evals/results/` (оба в .gitignore); после рестарта Docker S4 чинится
-`make stand-break SCENARIO=s4`; после демо S1 поломку возвращает `make stand-break SCENARIO=s1`.
+**Ловушки окружения:** в shell `FORCE_COLOR=3` (проверки снимают его); github.com периодически недоступен —
+повторять push; временное — в `.worktrees/` и `evals/results/` (в .gitignore); после демо S1 поломку
+возвращает `make stand-break SCENARIO=s1`; **не запускать демо и стенд-скрипты во время `make eval`** —
+evals читают живой стенд; `make -n` с `$(MAKE)` внутри выполняет вложенный make тоже вхолостую. Каталог прогона evals
+брать по имени из лога (`результаты: …`), а не `ls -t | head -1`: rejudge обновляет старый каталог, и он
+становится «самым свежим».
 
 ---
 
