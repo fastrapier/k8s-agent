@@ -59,6 +59,38 @@ class IncidentRecord(Strict):
     evidence_ids: list[str]
 
 
+class Route(Strict):
+    """Решение оркестратора о маршруте запроса (F1)."""
+
+    route: Literal["diagnose", "runbook_qa", "out_of_scope"]
+    reason: str
+
+
+class PlanStep(Strict):
+    goal: str = Field(description="какой факт нужно установить")
+    tool_hint: str = Field(description="каким инструментом его скорее всего получить")
+
+
+class Plan(Strict):
+    """План диагностики оркестратора (F2)."""
+
+    steps: list[PlanStep] = Field(min_length=1, max_length=8)
+
+
+class Hypotheses(Strict):
+    """Ответ аналитика (F4): гипотезы, каждая со ссылками на свидетельства."""
+
+    hypotheses: list[Hypothesis] = Field(min_length=1, max_length=3)
+
+
+class PatchProposal(Strict):
+    """Что предлагается человеку (F6). Патча может не быть — тогда только рекомендация."""
+
+    patch: Patch | None
+    recommendation: str = Field(description="что сделать, по-русски, 1–3 предложения")
+
+
+# Схемы, на которых сравнивались модели (LLM_SELECTION §4, блок B).
 SCHEMAS: dict[str, type[Strict]] = {
     model.__name__: model for model in (Hypothesis, Patch, ReviewVerdict, IncidentRecord)
 }

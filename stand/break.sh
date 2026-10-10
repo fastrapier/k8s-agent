@@ -39,6 +39,9 @@ check_s1() { [ "$(max_restarts 'app=api')" -ge 2 ]; }
 
 break_s1() {
   log "S1 — CrashLoopBackOff: Deployment api без DB_PASSWORD"
+  # Пересоздаём: если агент уже починил S1 патчем, apply старого манифеста поломку не вернёт —
+  # добавленной патчем переменной нет в last-applied, kubectl её не удалит.
+  kc delete deployment api -n "$NAMESPACE" --ignore-not-found --wait=true
   kc apply -f "$MANIFESTS_DIR/s1-crashloop/"
   # Симптом: под перезапустился минимум дважды. Первые два рестарта укладываются
   # в backoff 0с + 10с, то есть ~20–40с с учётом скачивания образа.

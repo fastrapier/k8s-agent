@@ -6,11 +6,12 @@ export PATH := $(HOME)/.local/bin:$(PATH)
 
 .DEFAULT_GOAL := help
 .PHONY: help install lock test lint lint-fix config-show tool \
-        stand-up stand-break stand-status stand-clean stand-down stand demo-s1 \
+        stand-up stand-break stand-status stand-clean stand-down stand demo-secrets \
+        demo-s1 demo-s1-container demo-s6 \
         isolation-test agent-build agent-tool eval-models check
 
 help:  ## список целей
-	@grep -hE '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^[a-z0-9-]+:.*?##' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 # --- М0: каркас -------------------------------------------------------------
 
@@ -54,7 +55,7 @@ stand: stand-up stand-break stand-status  ## одна команда: подня
 tool:  ## вызов инструмента: make tool TOOL=k8s_list_pods ARGS="--ns payments"
 	uv run k8s-agent tool $(TOOL) $(ARGS)
 
-demo-s1:  ## приёмка М1/М2: api в CrashLoopBackOff, Secret защищён двумя рубежами
+demo-secrets:  ## приёмка М1/М2: api в CrashLoopBackOff, Secret защищён двумя рубежами
 	@echo "--- поды в payments под учёткой диагноста: ожидается api в CrashLoopBackOff ---"
 	uv run k8s-agent tool k8s_list_pods --ns payments
 	@echo
@@ -64,6 +65,20 @@ demo-s1:  ## приёмка М1/М2: api в CrashLoopBackOff, Secret защищ�
 	@echo "--- рубеж 2, маскирование: тот же вызов под админом, как если бы RBAC настроили шире ---"
 	uv run k8s-agent tool k8s_get_manifest --kind Secret --name payments-db --ns payments \
 		--kubeconfig $(HOME)/.kube/config
+
+# --- М4: агент ---------------------------------------------------------------
+
+S1_QUERY = Под api в namespace payments в CrashLoopBackOff, разберись
+
+demo-s1:  ## приёмка М4: диагноз S1 → патч → подтверждение человеком → применение → проверка
+	uv run k8s-agent run "$(S1_QUERY)"
+
+demo-s1-container:  ## то же, но агент в изолированном контейнере (без root, сеть только через прокси)
+	@test -f .kube/agent-rw.container.kubeconfig || { echo "нет kubeconfig контейнера: make stand-up"; exit 1; }
+	docker compose run --rm agent run "$(S1_QUERY)"
+
+demo-s6:  ## приёмка М4: запрос вне области — вежливый отказ без единого вызова инструментов
+	uv run k8s-agent run "Напиши стихотворение про осень"
 
 # --- М2: изоляция -----------------------------------------------------------
 

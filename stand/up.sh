@@ -55,10 +55,11 @@ log "Выпускаю kubeconfig'и учёток агента в ${AGENT_KUBE_DI
 write_agent_kubeconfig incident-agent-ro "$RO_KUBECONFIG"
 write_agent_kubeconfig incident-agent-rw "$RW_KUBECONFIG"
 write_agent_kubeconfig incident-agent-ro "$RO_CONTAINER_KUBECONFIG" "$CONTAINER_API_SERVER"
+write_agent_kubeconfig incident-agent-rw "$RW_CONTAINER_KUBECONFIG" "$CONTAINER_API_SERVER"
 # В контейнер монтируется сам файл, и читает его uid 10001, а не владелец на хосте. На Linux
 # с режимом 600 он получил бы Permission denied. Другим пользователям хоста файл по-прежнему
 # недоступен: каталог .kube — 700, через него не пройти.
-chmod 644 "$RO_CONTAINER_KUBECONFIG"
+chmod 644 "$RO_CONTAINER_KUBECONFIG" "$RW_CONTAINER_KUBECONFIG"
 dim "диагност:    $RO_KUBECONFIG (incident-agent-ro, токен на 24 ч)"
 dim "исполнитель: $RW_KUBECONFIG (incident-agent-rw, токен на 24 ч)"
 dim "контейнер:   $RO_CONTAINER_KUBECONFIG (incident-agent-ro, адрес $CONTAINER_API_SERVER)"

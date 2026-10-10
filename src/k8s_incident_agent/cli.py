@@ -1,27 +1,26 @@
 """CLI `k8s-agent`.
 
-На этапах М0–М1 доступны две команды:
-
+* `k8s-agent run "<описание проблемы>"` — расследование инцидента графом агента (М4);
 * `k8s-agent config show` — печать конфига с замаскированным токеном;
-* `k8s-agent tool <имя> [аргументы]` — прямой вызов одного read-only инструмента.
-
-Команда `tool` существует ради приёмки этапа: она позволяет увидеть работу слоя
-инструментов без графа и без LLM.
+* `k8s-agent tool <имя> [аргументы]` — прямой вызов одного read-only инструмента, без графа и LLM.
 """
 
 from __future__ import annotations
 
 import json
+import time
+import uuid
 from pathlib import Path
 
 import typer
 from pydantic import ValidationError
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.markup import escape
 from rich.syntax import Syntax
 from rich.table import Table
 
-from k8s_incident_agent.config import get_config, redacted_dict
+from k8s_incident_agent.config import find_repo_root, get_config, redacted_dict
 from k8s_incident_agent.evidence import default_store
 from k8s_incident_agent.tools import READONLY_TOOLS
 
@@ -112,11 +111,12 @@ def run_tool(
 
     colour = {"ok": "green", "degraded": "yellow", "error": "red"}[result.status]
     # Текст из кластера (логи, события) — данные, а не разметка rich: «[/api]» в логе
-    # иначе уронил бы CLI с MarkupError, а «[api]» молча исчез бы из вывода.
+    # иначе уронил бы CLI с MarkupError, а «[api]» молча исчез бы из вывода. Автоподсветку
+    # тоже не включаем: она вставляет коды цвета внутрь строк лога.
     console.print(f"[{colour}]{result.status}[/{colour}] {result.evidence_id}: "
-                  f"{escape(result.summary)}")
+                  f"{escape(result.summary)}", highlight=False)
     if result.error and result.error not in result.summary:
-        console.print(f"[red]{escape(result.error)}[/red]")
+        console.print(f"[red]{escape(result.error)}[/red]", highlight=False)
     if result.data is not None:
         payload = json.dumps(result.data, ensure_ascii=False, indent=2)
         console.print(Syntax(payload, "json", theme="ansi_dark", word_wrap=True))
@@ -125,10 +125,83 @@ def run_tool(
     if raw:
         evidence = default_store.get(result.evidence_id)
         if evidence and evidence.raw_ref:
-            console.print(default_store.raw(evidence.raw_ref) or "", markup=False)
+            console.print(default_store.raw(evidence.raw_ref) or "", markup=False, highlight=False)
 
     if result.status == "error":
         raise typer.Exit(1)
+
+
+def _progress(node: str, change: dict) -> str:
+    """Одна строка о шаге графа: что узел сделал."""
+    change = change or {}
+    if node == "classify":
+        return f"маршрут: {change.get('route')}"
+    if node == "plan":
+        return "план: " + "; ".join(step["goal"] for step in change.get("plan", []))
+    if node == "diagnose":
+        new = ", ".join(e["id"] for e in change.get("evidence", [])) or "новых нет"
+        return f"свидетельства: {new} (вызовов инструментов всего: {change.get('tool_calls')})"
+    if node == "analyze":
+        return f"гипотез: {len(change.get('hypotheses', []))}"
+    if node == "review":
+        return f"ревью: {change.get('review_verdict')} (итерация {change.get('review_iterations')})"
+    if node == "propose":
+        patch = change.get("proposed_patch")
+        if not patch:
+            return "патча нет, только рекомендация"
+        return f"патч: {patch['kind']}/{patch['name']}"
+    if node == "execute":
+        result = change.get("execution_result")
+        return f"исполнение: {result['status']}" if result else "исполнение: не выполнялось"
+    return ""
+
+
+@app.command("run")
+def run_incident(
+    query: str = typer.Argument(..., help="описание проблемы, как его написал бы инженер"),
+    thread: str | None = typer.Option(None, "--thread", help="id инцидента для продолжения"),
+    model: str | None = typer.Option(None, "--model", help="модель вместо llm.model из конфига"),
+) -> None:
+    """Расследовать инцидент. Патч применяется только после вашего подтверждения."""
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.types import Command
+
+    from k8s_incident_agent.graph import Agent, build_graph
+    from k8s_incident_agent.llm import LLMClient
+
+    config = get_config()
+    thread_id = thread or uuid.uuid4().hex[:8]
+    checkpoints = find_repo_root() / "data" / "checkpoints.sqlite"
+    checkpoints.parent.mkdir(exist_ok=True)
+    llm = LLMClient(config, model=model)
+    agent = Agent(llm, config)
+    console.print(f"[dim]инцидент {thread_id}, модель {llm.model}[/dim]")
+
+    with SqliteSaver.from_conn_string(str(checkpoints)) as saver:
+        graph = build_graph(agent).compile(checkpointer=saver)
+        run_config = {"configurable": {"thread_id": thread_id}}
+        payload: object = {"query": query, "started": time.time(), "evidence": []}
+        while True:
+            pending = None
+            for update in graph.stream(payload, run_config, stream_mode="updates"):
+                for node, change in update.items():
+                    if node == "__interrupt__":
+                        pending = change[0].value
+                    elif line := _progress(node, change):
+                        console.print(f"[cyan]{node:>9}[/cyan] {escape(line)}")
+            if pending is None:
+                break
+            # F6: человек видит объект, патч, обоснование — и решает сам.
+            patch = pending["patch"]
+            console.print(f"\n[bold yellow]Предлагается патч {patch['kind']}/{patch['name']} "
+                          f"в {patch['namespace']}[/bold yellow]")
+            console.print(Syntax(json.dumps(patch["patch"], ensure_ascii=False, indent=2), "json"))
+            console.print(escape(pending["recommendation"]), markup=False)
+            approved = typer.confirm("Применить патч?", default=False)
+            payload = Command(resume="approved" if approved else "rejected")
+        report = graph.get_state(run_config).values.get("report", "")
+    console.print()
+    console.print(Markdown(report))
 
 
 if __name__ == "__main__":  # pragma: no cover
