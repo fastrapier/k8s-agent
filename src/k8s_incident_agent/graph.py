@@ -295,7 +295,7 @@ class Agent:
             {"role": "system", "content": PROPOSE},
             {"role": "user", "content": f"Запрос: {state['query']}\n\nГипотезы: {hypotheses}\n\n"
                                         f"Свидетельства:\n{self._evidence_text(state, True)}"}],
-            PatchProposal, usage)
+            PatchProposal, usage, free_form=True)
         patch = proposal.patch.model_dump() if proposal.patch else None
         recommendation = proposal.recommendation
         if patch is not None:

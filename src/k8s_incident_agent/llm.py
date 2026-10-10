@@ -103,11 +103,23 @@ class LLMClient:
             raise LLMError(reply.get("error") or "таймаут шлюза")
         return reply["message"]
 
-    def structured(self, messages: list, schema: type[BaseModel], usage: Usage) -> BaseModel:
-        """Ответ строго по pydantic-схеме; невалидный — повтор с текстом ошибки (ARCH §8)."""
-        response_format = {"type": "json_schema", "json_schema": {
-            "name": schema.__name__, "schema": schema.model_json_schema()}}
+    def structured(self, messages: list, schema: type[BaseModel], usage: Usage,
+                   free_form: bool = False) -> BaseModel:
+        """Ответ строго по pydantic-схеме; невалидный — повтор с текстом ошибки (ARCH §8).
+
+        free_form — для схем с открытым объектом (патч `dict[str, Any]`). Декодирование по
+        json_schema на таком поле у шлюза зацикливается: модель пишет патч, а затем десятки
+        тысяч пробелов до таймаута (2 из 5 прогонов). Тогда схема идёт текстом в промпт,
+        шлюз требует только валидный JSON (`json_object`), а форму проверяет pydantic.
+        """
         messages = list(messages)
+        if free_form:
+            response_format = {"type": "json_object"}
+            messages.append({"role": "system", "content": "Ответь одним JSON-объектом по схеме:\n"
+                             + json.dumps(schema.model_json_schema(), ensure_ascii=False)})
+        else:
+            response_format = {"type": "json_schema", "json_schema": {
+                "name": schema.__name__, "schema": schema.model_json_schema()}}
         error = ""
         for _ in range(FORMAT_RETRIES + 1):
             reply = self.raw(messages, response_format=response_format)

@@ -52,7 +52,7 @@ class FakeLLM:
             self.tool_turns += 1
         return self.chat_replies.pop(0) if self.chat_replies else {"content": "готово"}
 
-    def structured(self, messages, schema, usage):
+    def structured(self, messages, schema, usage, free_form=False):
         if schema.__name__ in self.fail:
             raise LLMError("таймаут шлюза")
         if schema is Route:
