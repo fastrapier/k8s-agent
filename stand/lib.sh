@@ -106,6 +106,29 @@ EOF
   )
 }
 
+# Все четыре kubeconfig'а учёток агента: на хосте и для контейнера. Зовут ./up.sh и ./tokens.sh.
+write_agent_kubeconfigs() {
+  write_agent_kubeconfig incident-agent-ro "$RO_KUBECONFIG"
+  write_agent_kubeconfig incident-agent-rw "$RW_KUBECONFIG"
+  write_agent_kubeconfig incident-agent-ro "$RO_CONTAINER_KUBECONFIG" "$CONTAINER_API_SERVER"
+  write_agent_kubeconfig incident-agent-rw "$RW_CONTAINER_KUBECONFIG" "$CONTAINER_API_SERVER"
+  # В контейнер монтируется сам файл, и читает его uid 10001, а не владелец на хосте. На Linux
+  # с режимом 600 он получил бы Permission denied. Другим пользователям хоста файл по-прежнему
+  # недоступен: каталог .kube — 700, через него не пройти.
+  chmod 644 "$RO_CONTAINER_KUBECONFIG" "$RW_CONTAINER_KUBECONFIG"
+  local expires
+  expires="$(date -v+24H '+%d.%m %H:%M' 2>/dev/null || date -d '+24 hours' '+%d.%m %H:%M')"
+  dim "диагност:    $RO_KUBECONFIG (incident-agent-ro, токен до $expires)"
+  dim "исполнитель: $RW_KUBECONFIG (incident-agent-rw, токен до $expires)"
+  dim "контейнер:   $RO_CONTAINER_KUBECONFIG (incident-agent-ro, адрес $CONTAINER_API_SERVER)"
+}
+
+# Принимает ли API-сервер токен диагноста: истёкший токен даёт Unauthorized на каждом вызове.
+agent_token_accepted() {
+  [ -f "$RO_KUBECONFIG" ] && kubectl --kubeconfig "$RO_KUBECONFIG" \
+    auth can-i list pods -n "$NAMESPACE" >/dev/null 2>&1
+}
+
 # Ожидание симптома с таймаутом.
 # Использование: wait_for "человекочитаемое описание" функция_проверки
 # Функция проверки возвращает 0, когда условие выполнено.

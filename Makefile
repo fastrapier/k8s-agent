@@ -6,7 +6,7 @@ export PATH := $(HOME)/.local/bin:$(PATH)
 
 .DEFAULT_GOAL := help
 .PHONY: help install lock test lint lint-fix config-show tool \
-        stand-up stand-break stand-status stand-clean stand-down stand demo-secrets \
+        stand-up stand-tokens stand-break stand-status stand-clean stand-down stand demo-secrets \
         demo demo-s1 demo-s1-container demo-s5 demo-s6 memory-list \
         isolation-test agent-build agent-tool eval-models eval alerts-check obs-up obs-down metrics check
 
@@ -37,6 +37,9 @@ config-show:  ## приёмка М0: конфиг, токен должен бы�
 
 stand-up:  ## поднять kind-кластер и здоровую базу
 	./stand/up.sh
+
+stand-tokens:  ## перевыпустить токены учёток агента (живут 24 ч; истёкший — Unauthorized у всех инструментов)
+	./stand/tokens.sh
 
 stand-break:  ## внести поломку: SCENARIO=s1|s2|s3|s4|all (по умолчанию all)
 	./stand/break.sh $(or $(SCENARIO),all)
@@ -91,24 +94,34 @@ memory-list:  ## записи эпизодической памяти data/memor
 
 # --- М10: сценарий защиты ----------------------------------------------------
 # Порядок и что говорить на каждом шаге — docs/DEMO.md. Подтверждение патча — вручную («y»).
+# Заголовок шага: номер, что происходит и куда смотреть на экране.
+DEMO_STEP = printf '\n\033[1;7m ШАГ %s \033[0m \033[1m%s\033[0m\n\033[2mсмотреть: %s\033[0m\n\n'
 
 demo:  ## М10: защита целиком — стенд, отказ S6, S1 с подтверждением, трейс, повтор S5 с памятью, метрики
-	@printf '\n\033[1m== 1/6 Стенд: четыре поломки внесены\033[0m\n'
+	@$(DEMO_STEP) 1/6 "Стенд: четыре поломки внесены, у агента свежий токен" \
+		"все строки «сломано как надо», токен агента «принят»"
 	@# Память демо — с чистого листа: на шаге 5 агент находит ровно то, что записал на шаге 3.
 	@# Прежняя память не удаляется, а откладывается рядом.
 	@test ! -f data/memory.sqlite || mv data/memory.sqlite data/memory.$$(date +%Y%m%dT%H%M%S).sqlite
+	@# Токен учётки живёт 24 ч: истёкший — Unauthorized у каждого инструмента.
+	@$(MAKE) -s stand-tokens >/dev/null
 	@$(MAKE) -s stand-break SCENARIO=s1 >/dev/null
-	@$(MAKE) -s stand-status | grep -E 'S[1-4]'
-	@printf '\n\033[1m== 2/6 S6: запрос вне области — отказ без единого вызова инструментов\033[0m\n'
+	@$(MAKE) -s stand-status | grep -E 'S[1-4]|Токен агента|токен не принят'
+	@$(DEMO_STEP) 2/6 "S6: запрос вне области — отказ" \
+		"маршрут out_of_scope, ни одного вызова инструментов; ниже «Ответ агента»"
 	@$(MAKE) -s demo-s6
-	@printf '\n\033[1m== 3/6 S1: жалоба → скилл → свидетельства → патч → ваше подтверждение\033[0m\n'
+	@$(DEMO_STEP) 3/6 "S1: жалоба → скилл → свидетельства → патч → ваше подтверждение" \
+		"ход расследования (узел слева, что сделал справа) → рамка «Нужно ваше решение», ввести y → «Ответ агента»"
 	@uv run k8s-agent run "$(S1_QUERY)" --show-skill
-	@printf '\n\033[1m== 4/6 Трейс этого прогона: каждый вызов модели и инструмента\033[0m\n'
+	@$(DEMO_STEP) 4/6 "Трейс прогона шага 3: каждый вызов модели и инструмента" \
+		"две правые колонки — время и цена каждого вызова; строки tool — какие инструменты вызваны"
 	@uv run k8s-agent trace --last
-	@printf '\n\033[1m== 5/6 S5: та же поломка снова — агент находит прошлый случай в памяти\033[0m\n'
+	@$(DEMO_STEP) 5/6 "S5: та же поломка снова — агент находит прошлый случай в памяти" \
+		"в «Ответе агента» раздел «Похожие инциденты»: случай шага 3 — тот же класс"
 	@$(MAKE) -s stand-break SCENARIO=s1 >/dev/null
 	@$(MAKE) -s demo-s5
-	@printf '\n\033[1m== 6/6 Метрики Prometheus, посчитанные из трейсов\033[0m\n'
+	@$(DEMO_STEP) 6/6 "Метрики Prometheus, посчитанные из трейсов" \
+		"счётчики по всем прогонам в data/traces (не только этого демо): исходы, время, цена"
 	@uv run k8s-agent metrics show | grep -E '^agent_(runs_total|approvals_total|run_duration_seconds_(sum|count)|run_cost_usd_sum)'
 
 # --- М2: изоляция -----------------------------------------------------------

@@ -100,6 +100,13 @@ fi
 hr="$(ready_pods 'app=checkout')"
 printf '  %s[ контроль        ]%s Здоровый Deployment checkout: Ready=%s (ожидается 2)\n' "$C_BLUE" "$C_RESET" "$hr"
 
+# Стенд может быть сломан как надо, а агент всё равно слеп: токен учётки живёт 24 ч.
+if agent_token_accepted; then
+  printf '  %s[ контроль        ]%s Токен агента incident-agent-ro: принят\n' "$C_BLUE" "$C_RESET"
+else
+  printf '  %s[ токен не принят ]%s Токен агента истёк или не выпущен — все вызовы инструментов получат Unauthorized. Выпустить: make stand-tokens\n' "$C_RED" "$C_RESET"
+fi
+
 echo
 log "Последние события namespace $NAMESPACE"
 kc get events -n "$NAMESPACE" --sort-by=.lastTimestamp 2>/dev/null | tail -12 || true

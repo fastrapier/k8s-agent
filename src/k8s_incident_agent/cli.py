@@ -18,11 +18,14 @@ from pathlib import Path
 
 import typer
 from pydantic import ValidationError
-from rich.console import Console
+from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.markup import escape
+from rich.panel import Panel
+from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.table import Table
+from rich.text import Text
 
 from k8s_incident_agent.config import find_repo_root, get_config, redacted_dict
 from k8s_incident_agent.evidence import default_store
@@ -93,7 +96,7 @@ def memory_search(
 @memory_app.command("seed")
 def memory_seed(path: str = typer.Argument(..., help="YAML со списком инцидентов")) -> None:
     """Загрузить фикстуру прошлых инцидентов (S5). Повторная загрузка безопасна."""
-    console.print("загружено: " + ", ".join(_memory().seed(Path(path))))
+    console.print("в память добавлены прошлые инциденты: " + ", ".join(_memory().seed(Path(path))))
 
 
 @app.command("tool")
@@ -187,7 +190,8 @@ def _progress(node: str, change: dict) -> str:
         return f"маршрут: {change.get('route')}"
     if node == "plan":
         skill = f"скилл {change['active_skill']}; " if change.get("active_skill") else ""
-        return skill + "план: " + "; ".join(step["goal"] for step in change.get("plan", []))
+        steps = (f"{n}. {step['goal']}" for n, step in enumerate(change.get("plan", []), 1))
+        return skill + "план:\n" + "\n".join(steps)
     if node == "diagnose":
         new = ", ".join(e["id"] for e in change.get("evidence", [])) or "новых нет"
         return f"свидетельства: {new} (вызовов инструментов всего: {change.get('tool_calls')})"
@@ -237,7 +241,11 @@ def run_incident(
     tracer = Tracer(_traces_dir() / f"{thread_id}.jsonl", thread_id)
     llm = LLMClient(config, model=model, tracer=tracer)
     agent = Agent(llm, config, memory=_memory(), tracer=tracer)
-    console.print(f"[dim]инцидент {thread_id}, модель {llm.model}[/dim]")
+    # Границы прогона видны глазом: заголовок → ход расследования → [решение] → ответ → конец.
+    console.print(Rule(f"[bold]Инцидент {thread_id}[/bold] · модель {llm.model}", align="left"))
+    if query:
+        console.print(Text.assemble(("Жалоба: ", "bold"), query))
+    console.print("[dim]ход расследования — что сделал каждый узел графа:[/dim]")
 
     with SqliteSaver.from_conn_string(str(checkpoints)) as saver:
         graph = build_graph(agent).compile(checkpointer=saver)
@@ -263,23 +271,33 @@ def run_incident(
                         if node == "__interrupt__":
                             pending = change[0].value
                         elif line := _progress(node, change):
-                            console.print(f"[cyan]{node:>9}[/cyan] {escape(line)}")
+                            # Сетка, а не строка: перенос длинного текста остаётся под текстом.
+                            row = Table.grid(padding=(0, 1))
+                            row.add_column(justify="right", width=9, style="cyan")
+                            row.add_column()
+                            row.add_row(node, Text(line))
+                            console.print(row)
                         if show_skill and node == "plan" and (change or {}).get("active_skill"):
                             skill = next(s for s in load_skills()
                                          if s.name == change["active_skill"])
-                            console.print(Markdown(f"**Скилл {skill.name}** — {skill.description}"
-                                                   f"\n\n{skill.body}"))
+                            console.print(Panel(
+                                Markdown(f"*{skill.description}*\n\n{skill.body}"),
+                                title=f"скилл {skill.name}: инструкция, которую plan выдал агенту "
+                                      f"(skills/{skill.name}/SKILL.md)",
+                                title_align="left", border_style="dim"))
             if pending is None:
                 break
             # F6: человек видит объект, патч, обоснование и свидетельства — и решает сам.
             patch = pending["patch"]
-            console.print(f"\n[bold yellow]Предлагается патч {patch['kind']}/{patch['name']} "
-                          f"в {patch['namespace']}[/bold yellow]")
-            console.print(Syntax(json.dumps(patch["patch"], ensure_ascii=False, indent=2), "json"))
-            console.print(escape(f"Почему: {patch['rationale']} (свидетельства: "
-                                 f"{', '.join(patch['evidence_ids'])})"), highlight=False)
-            console.print(escape(pending["recommendation"]), markup=False)
-            console.print(f"[dim]ответить позже: k8s-agent run --thread {thread_id}[/dim]")
+            console.print(Panel(
+                Group(Syntax(json.dumps(patch["patch"], ensure_ascii=False, indent=2), "json"),
+                      Text(f"\nПочему: {patch['rationale']} (свидетельства: "
+                           f"{', '.join(patch['evidence_ids'])})"),
+                      Text(f"\n{pending['recommendation']}")),
+                title=f"[bold]Нужно ваше решение: патч {patch['kind']}/{patch['name']} "
+                      f"в {patch['namespace']}[/bold]",
+                subtitle=f"ответить позже: k8s-agent run --thread {thread_id}",
+                title_align="left", border_style="yellow"))
             asked = time.monotonic()
             approved = typer.confirm("Применить патч?", default=False)
             decision = "approved" if approved else "rejected"
@@ -289,9 +307,10 @@ def run_incident(
         final = graph.get_state(run_config).values
         tracer.finish(final)
         report = final.get("report", "")
-    console.print()
+    console.print(Rule("[bold green]Ответ агента[/bold green]", align="left", style="green"))
     console.print(Markdown(report))
-    console.print(f"[dim]трейс: k8s-agent trace {thread_id}[/dim]")
+    console.print(Rule(f"конец инцидента {thread_id} · трейс: k8s-agent trace {thread_id}",
+                       align="left", style="dim"))
 
 
 @app.command("trace")
