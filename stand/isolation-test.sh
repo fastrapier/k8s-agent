@@ -49,7 +49,7 @@ whoami_is() {
   local who
   who="$(kubectl --kubeconfig "$1" --context "$KUBE_CONTEXT" auth whoami \
            -o jsonpath='{.status.userInfo.username}' 2>/dev/null || true)"
-  [ -n "$who" ] || die "API-сервер не принял токен из $(basename "$1") (истёк?). Выпустить новый: make stand-up"
+  [ -n "$who" ] || die "API-сервер не принял токен из $(basename "$1") (истёк?). Выпустить новый: make stand-tokens"
   if [ "$who" = "$2" ]; then pass "$(basename "$1") → $who"
   else fail "$(basename "$1") → $who, ожидалось $2"; fi
 }
